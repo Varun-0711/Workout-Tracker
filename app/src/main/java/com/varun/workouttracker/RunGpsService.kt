@@ -19,17 +19,20 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import java.util.Locale
 
-/** Foreground GPS collection for an explicitly started running workout. */
+/** Foreground GPS collection for explicitly started outdoor cardio workouts. */
 class RunGpsService : Service(), LocationListener {
     private var locationManager: LocationManager? = null
     private var lastAcceptedLocation: Location? = null
     private var distanceMeters = 0.0
     private var lastPaceSecondsPerKm = 0.0
+    private var activityType = "Running"
 
     override fun onCreate() {
         super.onCreate()
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         val prefs = preferences(this)
+        activityType = intent?.getStringExtra(EXTRA_ACTIVITY_TYPE) ?: prefs.getString(KEY_ACTIVITY_TYPE, "Running") ?: "Running"
+        prefs.edit().putString(KEY_ACTIVITY_TYPE, activityType).apply()
         distanceMeters = prefs.getFloat(KEY_DISTANCE_METERS, 0f).toDouble()
         lastPaceSecondsPerKm = prefs.getFloat(KEY_PACE_SECONDS_PER_KM, 0f).toDouble()
         createNotificationChannel()
@@ -101,11 +104,11 @@ class RunGpsService : Service(), LocationListener {
         if (previous != null) {
             val segmentMeters = previous.distanceTo(location).toDouble()
             val elapsedSeconds = (location.time - previous.time).coerceAtLeast(1L) / 1_000.0
-            val maxPlausibleMeters = elapsedSeconds * MAX_RUNNING_SPEED_METERS_PER_SECOND + 10.0
+            val maxPlausibleMeters = elapsedSeconds * maxSpeedMetersPerSecond(activityType) + 10.0
             if (segmentMeters > MIN_SEGMENT_METERS && segmentMeters <= maxPlausibleMeters) {
                 distanceMeters += segmentMeters
                 val speed = if (location.hasSpeed()) location.speed.toDouble() else segmentMeters / elapsedSeconds
-                if (speed in MIN_PACE_SPEED_METERS_PER_SECOND..MAX_RUNNING_SPEED_METERS_PER_SECOND) {
+                if (speed in MIN_PACE_SPEED_METERS_PER_SECOND..maxSpeedMetersPerSecond(activityType)) {
                     lastPaceSecondsPerKm = 1_000.0 / speed
                 } else if (speed < MIN_PACE_SPEED_METERS_PER_SECOND) {
                     lastPaceSecondsPerKm = 0.0
@@ -152,8 +155,8 @@ class RunGpsService : Service(), LocationListener {
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         return builder
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setContentTitle("Run GPS tracking")
-            .setContentText(String.format(Locale.getDefault(), "%.2f km · recording your run", km))
+            .setContentTitle("$activityType GPS tracking")
+            .setContentText(String.format(Locale.getDefault(), "%.2f km · recording your activity", km))
             .setContentIntent(pending)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -168,15 +171,19 @@ class RunGpsService : Service(), LocationListener {
         }
     }
 
+    private fun maxSpeedMetersPerSecond(activity: String): Double = if (activity == "Cycling") MAX_CYCLING_SPEED_METERS_PER_SECOND else MAX_RUNNING_SPEED_METERS_PER_SECOND
+
     companion object {
         const val ACTION_START = "com.varun.workouttracker.action.START_RUN_GPS"
         const val ACTION_STOP = "com.varun.workouttracker.action.STOP_RUN_GPS"
+        const val EXTRA_ACTIVITY_TYPE = "activity_type"
         const val PREFS = "workout_run_gps"
         const val KEY_DISTANCE_METERS = "distance_meters"
         const val KEY_PACE_SECONDS_PER_KM = "pace_seconds_per_km"
         const val KEY_TRACKING = "tracking"
         const val KEY_HAS_FIX = "has_fix"
         const val KEY_STATUS = "status"
+        private const val KEY_ACTIVITY_TYPE = "activity_type"
         private const val KEY_RESET_PENDING = "reset_pending"
         private const val CHANNEL_ID = "run_gps_tracking"
         private const val NOTIFICATION_ID = 4103
@@ -184,6 +191,7 @@ class RunGpsService : Service(), LocationListener {
         private const val MIN_SEGMENT_METERS = 1.5
         private const val MIN_PACE_SPEED_METERS_PER_SECOND = 0.5
         private const val MAX_RUNNING_SPEED_METERS_PER_SECOND = 8.0
+        private const val MAX_CYCLING_SPEED_METERS_PER_SECOND = 25.0
 
         fun preferences(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 

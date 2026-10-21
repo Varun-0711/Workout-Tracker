@@ -79,10 +79,16 @@ object ActivityCalories {
         return estimateMetCalories(PUSHUP_VIGOROUS_MET, weightKg, durationMillis, heightCm, ageYears)
     }
 
-    /** Approximate level-ground running energy cost, about 1 kcal per kg per kilometer. */
-    fun estimateRunningDistanceCalories(distanceMeters: Double, weightKg: Double): Int? {
+    /** Approximate outdoor distance calorie estimate, with distinct cost per km by activity. */
+    fun estimateDistanceCalories(activity: String, distanceMeters: Double, weightKg: Double): Int? {
         if (distanceMeters <= 0.0 || weightKg <= 0.0) return null
-        return (distanceMeters / 1_000.0 * weightKg).toInt().coerceAtLeast(0)
+        val kcalPerKgKm = when (activity) {
+            "Cycling" -> 0.30 // moderate recreational cycling; duration/MET estimate preferred when GPS speed is unavailable
+            "Hiking" -> 0.75
+            "Walking" -> 0.50
+            else -> 1.0 // running/jogging level-ground approximation
+        }
+        return (distanceMeters / 1_000.0 * weightKg * kcalPerKgKm).toInt().coerceAtLeast(0)
     }
 
     private fun estimateMetCalories(met: Double, weightKg: Double, durationMillis: Long, heightCm: Int?, ageYears: Int?): Int {

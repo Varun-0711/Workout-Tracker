@@ -94,6 +94,8 @@ private val StarterExercises = listOf(
     "Crunches", "Burpee", "Mountain Climber", "Jumping Jack", "Glute Bridge",
 )
 private val ActivityTypes = ActivityCalories.activities.map { it.name }
+private val GpsActivityTypes = setOf("Running", "Jogging", "Walking", "Hiking", "Cycling")
+private fun isGpsActivity(activity: String) = activity in GpsActivityTypes
 private val BodyweightExerciseNames = setOf(
     "pushup", "pullup", "chinup", "dip", "dips", "plank", "burpee", "airsquat",
     "bodyweightsquat", "jumpingjack", "mountainclimber", "situp", "situps",
@@ -148,6 +150,7 @@ private fun WorkoutTrackerApp() {
     var gpsTracking by remember { mutableStateOf(RunGpsService.preferences(context).getBoolean(RunGpsService.KEY_TRACKING, false)) }
     var gpsHasFix by remember { mutableStateOf(RunGpsService.preferences(context).getBoolean(RunGpsService.KEY_HAS_FIX, false)) }
     var gpsStatus by remember { mutableStateOf(RunGpsService.preferences(context).getString(RunGpsService.KEY_STATUS, "idle") ?: "idle") }
+    var gpsActivityType by remember { mutableStateOf(RunGpsService.preferences(context).getString("activity_type", "Running") ?: "Running") }
     var pendingGpsStart by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var selectedTab by remember { mutableStateOf(AppTab.HOME) }
@@ -203,8 +206,10 @@ private fun WorkoutTrackerApp() {
         if (stepTracking) context.startService(Intent(context, StepCounterService::class.java).setAction(StepCounterService.ACTION_STOP))
         else requestStepTracking()
     }
-    val startRunGpsService = {
-        ContextCompat.startForegroundService(context, Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_START))
+    val startRunGpsService: (String) -> Unit = { activity ->
+        gpsActivityType = activity
+        ContextCompat.startForegroundService(context, Intent(context, RunGpsService::class.java)
+            .setAction(RunGpsService.ACTION_START).putExtra(RunGpsService.EXTRA_ACTIVITY_TYPE, activity))
     }
     val runLocationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (pendingGpsStart) {
@@ -216,7 +221,7 @@ private fun WorkoutTrackerApp() {
                 gpsPaceSecondsPerKm = 0.0
                 gpsHasFix = false
                 workout = workout.startActivityTimer(now)
-                startRunGpsService()
+                startRunGpsService(workout.activityType)
             } else {
                 android.widget.Toast.makeText(context, "Location permission was not granted. The run timer will start without GPS.", android.widget.Toast.LENGTH_LONG).show()
                 workout = workout.startActivityTimer(now)
@@ -400,7 +405,7 @@ private fun WorkoutTrackerApp() {
                                 showActivityPicker = true
                             },
                             onStartTimer = {
-                                if (workout.activityType == "Running") {
+                                if (isGpsActivity(workout.activityType)) {
                                     val hasLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                                         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
                                     if (hasLocation) {
@@ -409,7 +414,7 @@ private fun WorkoutTrackerApp() {
                                         gpsPaceSecondsPerKm = 0.0
                                         gpsHasFix = false
                                         update { it.startActivityTimer(now) }
-                                        startRunGpsService()
+                                        startRunGpsService(workout.activityType)
                                     } else {
                                         RunGpsService.resetSession(context)
                                         gpsDistanceMeters = 0.0
@@ -427,29 +432,22 @@ private fun WorkoutTrackerApp() {
                             onTogglePause = {
                                 val wasPaused = workout.pausedAt > 0L
                                 update { it.togglePause(now) }
-                                if (workout.activityType == "Running") {
-                                    if (wasPaused) startRunGpsService()
+                                if (isGpsActivity(workout.activityType)) {
+                                    if (wasPaused) startRunGpsService(workout.activityType)
                                     else context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
                                 }
                             },
                             onStopTimer = {
                                 update { it.stopActivityTimer(now) }
-                                if (workout.activityType == "Running") context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
+                                if (isGpsActivity(workout.activityType)) context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
                             },
                             gpsDistanceMeters = gpsDistanceMeters,
                             gpsPaceSecondsPerKm = gpsPaceSecondsPerKm,
                             gpsTracking = gpsTracking,
                             gpsHasFix = gpsHasFix,
                             gpsStatus = gpsStatus,
-                            gpsCalories = bodyWeightKg?.let { ActivityCalories.estimateRunningDistanceCalories(gpsDistanceMeters, it) },
-                        )
-                    }
-                    if (!requireActivityChoice && workout.activityType != "Choose activity") item {
-                        IntensitySelector(
-                            activity = workout.activityType,
-                            intensity = workout.intensity,
-                            enabled = !workout.finished,
-                            onChange = { value -> update { it.copy(intensity = value) } },
+                            gpsActivityType = workout.activityType,
+                            gpsCalories = bodyWeightKg?.let { ActivityCalories.estimateDistanceCalories(workout.activityType, gpsDistanceMeters, it) },
                         )
                     }
                     if (!requireActivityChoice && workout.activityType == "Strength") item {
@@ -584,7 +582,7 @@ private fun WorkoutTrackerApp() {
                                 val duration = workout.elapsedMillis(now)
                                 val weightForSession = WorkoutStorage.bodyWeightBefore(context, workout.startedAt)
                                 val savedRunDistance = RunGpsService.preferences(context).getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()
-                                val runDistance = savedRunDistance.takeIf { workout.activityType == "Running" && it > 0.0 }
+                                val runDistance = savedRunDistance.takeIf { isGpsActivity(workout.activityType) && it > 0.0 }
                                 val averagePace = runDistance?.let { distance -> duration.toDouble() / distance }
                                 val record = WorkoutRecord(
                                     title = workout.title,
@@ -598,7 +596,7 @@ private fun WorkoutTrackerApp() {
                                     distanceMeters = runDistance,
                                     averagePaceSecondsPerKm = averagePace,
                                     estimatedCalories = weightForSession?.let {
-                                        if (runDistance != null) ActivityCalories.estimateRunningDistanceCalories(runDistance, it)
+                                        if (runDistance != null) ActivityCalories.estimateDistanceCalories(workout.activityType, runDistance, it)
                                         else ActivityCalories.estimateCalories(
                                                 workout.activityType,
                                                 workout.intensity,
@@ -609,7 +607,7 @@ private fun WorkoutTrackerApp() {
                                             )
                                     },
                                 )
-                                if (workout.activityType == "Running") context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
+                                if (isGpsActivity(workout.activityType)) context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
                                 update { state ->
                                     state.copy(
                                         history = state.history + record,
@@ -1249,7 +1247,7 @@ private fun SettingsTrackingCard(
             Text("STEP TRACKING & PERMISSIONS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Text(if (tracking) "Step tracking is active in the background." else "Step tracking is paused.", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text("Step sensor: ${if (sensorAvailable) "Available" else "Not available on this device"}", color = Muted, fontSize = 12.sp)
-            Text("Run GPS permission: ${if (locationPermission) "Allowed" else "Ask when starting a run"}", color = Muted, fontSize = 12.sp)
+            Text("Outdoor activity GPS: ${if (locationPermission) "Allowed" else "Ask when starting an activity"}", color = Muted, fontSize = 12.sp)
             Text("Physical activity permission: ${if (activityPermission) "Allowed" else "Not allowed"}", color = Muted, fontSize = 12.sp)
             Text("Notifications: ${if (notificationPermission) "Allowed / not required" else "Not allowed"}", color = Muted, fontSize = 12.sp)
             Button(onClick = onToggleTracking, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.buttonColors(containerColor = Forest), enabled = sensorAvailable) {
@@ -1333,6 +1331,7 @@ private fun WorkoutStartCard(
     gpsHasFix: Boolean,
     gpsStatus: String,
     gpsCalories: Int?,
+    gpsActivityType: String,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val intervalLabel = if (workout.cardioMode == "stopwatch") {
@@ -1451,7 +1450,7 @@ private fun WorkoutStartCard(
                     ) { Text("Stop", color = Color.White, fontSize = 12.sp) }
                 }
             }
-            if (workout.activityType == "Running" && workout.timerStarted && !workout.timerStopped) {
+            if (isGpsActivity(workout.activityType) && workout.timerStarted && !workout.timerStopped) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 0.dp).padding(bottom = 14.dp),
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
@@ -1461,8 +1460,8 @@ private fun WorkoutStartCard(
                         Text("${"%.2f".format(Locale.US, gpsDistanceMeters / 1_000.0)} km", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                     }
                     Column {
-                        Text("PACE", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-                        Text(if (gpsPaceSecondsPerKm > 0) formatPace(gpsPaceSecondsPerKm) else "—:— /km", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                        Text(if (gpsActivityType == "Cycling") "SPEED" else "PACE", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(if (gpsPaceSecondsPerKm > 0) formatSpeedOrPace(gpsPaceSecondsPerKm, gpsActivityType) else if (gpsActivityType == "Cycling") "— km/h" else "—:— /km", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                     }
                     Column {
                         Text("CALORIES", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
@@ -1473,7 +1472,7 @@ private fun WorkoutStartCard(
                 Text(
                     when {
                         gpsHasFix && gpsDistanceMeters > 0 -> if (gpsTracking) "Location recording" else "Location paused"
-                        gpsStatus == "location_disabled" -> "Turn on device location to track this run"
+                        gpsStatus == "location_disabled" -> "Turn on device location to track this activity"
                         gpsTracking -> "Waiting for GPS signal…"
                         else -> "GPS unavailable · timer still works"
                     },
@@ -1491,6 +1490,10 @@ private fun formatPace(secondsPerKm: Double): String {
     val totalSeconds = secondsPerKm.toInt()
     return "${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')} /km"
 }
+
+private fun formatSpeedOrPace(secondsPerKm: Double, activity: String): String =
+    if (activity == "Cycling") String.format(Locale.US, "%.1f km/h", 3_600.0 / secondsPerKm)
+    else "${formatPace(secondsPerKm)} /km"
 
 @Composable
 private fun CardioTimerSettings(
@@ -2002,31 +2005,6 @@ private fun BodyWeightAndCaloriesCard(
 }
 
 @Composable
-private fun IntensitySelector(activity: String, intensity: String, enabled: Boolean, onChange: (String) -> Unit) {
-    val met = ActivityCalories.activities.firstOrNull { it.name == activity }?.metFor(intensity)
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(17.dp)) {
-        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text("EFFORT FOR CALORIE ESTIMATE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("light", "moderate", "vigorous").forEach { level ->
-                    val selected = intensity == level
-                    Text(
-                        level.replaceFirstChar { it.uppercase() },
-                        modifier = Modifier.weight(1f).background(if (selected) SoftGreen else Canvas, RoundedCornerShape(10.dp))
-                            .clickable(enabled = enabled) { onChange(level) }.padding(vertical = 11.dp),
-                        color = if (selected) Forest else Muted,
-                        fontSize = 12.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            }
-            Text("Choose the effort you sustained for most of the session.", color = Muted, fontSize = 11.sp)
-            met?.let { Text("${"%.1f".format(Locale.US, it)} MET · 2024 Adult Compendium", color = Forest, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
-        }
-    }
-}
-
 private fun activityEmoji(activity: String): String = when (activity) {
     "Strength" -> "🏋"
     "Running", "Jogging" -> "🏃"
@@ -2221,7 +2199,7 @@ private fun HistoryCard(record: WorkoutRecord) {
             )
             record.estimatedCalories?.let { kcal ->
                 Text(
-                    if (record.distanceMeters != null) "~$kcal kcal · distance-based estimate" else "~$kcal kcal · ${record.intensity} effort",
+                    if (record.distanceMeters != null) "~$kcal kcal · distance-based estimate" else "~$kcal kcal · time-based estimate",
                     color = Forest,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 12.sp,
@@ -2231,7 +2209,7 @@ private fun HistoryCard(record: WorkoutRecord) {
             record.distanceMeters?.takeIf { it > 0 }?.let { distance ->
                 val pace = record.averagePaceSecondsPerKm
                 Text(
-                    "${"%.2f".format(Locale.US, distance / 1_000.0)} km${pace?.let { " · ${formatPace(it)} average" } ?: ""}",
+                    "${"%.2f".format(Locale.US, distance / 1_000.0)} km${pace?.let { " · ${formatSpeedOrPace(it, record.activityType)} average" } ?: ""}",
                     color = Forest,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 12.sp,
