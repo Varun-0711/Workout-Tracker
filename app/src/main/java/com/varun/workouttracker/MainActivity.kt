@@ -1,6 +1,12 @@
 package com.varun.workouttracker
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -8,6 +14,8 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,9 +51,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -64,6 +74,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Calendar
 import java.util.Locale
+import androidx.core.content.ContextCompat
 
 private val Canvas = Color(0xFFF5F3EF)
 private val Ink = Color(0xFF292B2E)
@@ -75,11 +86,33 @@ private val SoftGreen = Color(0xFFEAECE8)
 private val CalendarGreen = Color(0xFF6E947A)
 private val StarterExercises = listOf(
     "Bench Press", "Squat", "Deadlift", "Overhead Press", "Lat Pulldown",
-    "Dumbbell Row", "Push-up", "Pull-up",
+    "Dumbbell Row", "Push-up", "Pull-up", "Chin-up", "Dips", "Dumbbell Bench Press",
+    "Incline Bench Press", "Front Squat", "Romanian Deadlift", "Leg Press", "Leg Curl",
+    "Leg Extension", "Lateral Raise", "Bicep Curl", "Hammer Curl", "Triceps Pushdown",
+    "Seated Cable Row", "Chest Fly", "Hip Thrust", "Lunge", "Calf Raise", "Plank",
+    "Bodyweight Squat", "Bodyweight Lunge", "Bodyweight Calf Raise",
+    "Crunches", "Burpee", "Mountain Climber", "Jumping Jack", "Glute Bridge",
 )
-private val ActivityTypes = listOf("Strength", "Running", "Cycling", "Jogging", "Jump Rope")
+private val ActivityTypes = ActivityCalories.activities.map { it.name }
+private val BodyweightExerciseNames = setOf(
+    "pushup", "pullup", "chinup", "dip", "dips", "plank", "burpee", "airsquat",
+    "bodyweightsquat", "jumpingjack", "mountainclimber", "situp", "situps",
+    "crunch", "crunches", "stepup", "boxjump", "glutebridge", "legraise",
+    "mountainclimbers", "jumpingjacks", "highknees", "pushupknees", "wallsit", "superman",
+)
 
-private enum class AppTab { HOME, WORKOUT, HISTORY }
+private fun isBodyweightExercise(exercise: String): Boolean {
+    val normalized = exercise.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+    if (normalized.startsWith("weighted")) return false
+    return normalized in BodyweightExerciseNames || "bodyweight" in normalized || normalized.startsWith("bw")
+}
+
+private fun WorkoutSet.needsWeight(): Boolean = !isBodyweightExercise(exercise)
+
+private fun List<WorkoutSet>.hasMissingRequiredWeights(): Boolean =
+    any { it.needsWeight() && it.weight.toDoubleOrNull() == null }
+
+private enum class AppTab { HOME, WORKOUT, HISTORY, SETTINGS }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,6 +134,21 @@ class MainActivity : ComponentActivity() {
 private fun WorkoutTrackerApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
     var workout by remember { mutableStateOf(WorkoutStorage.load(context)) }
+    var bodyWeightKg by remember { mutableStateOf(WorkoutStorage.loadBodyWeightKg(context)) }
+    var stepCount by remember { mutableLongStateOf(StepCounterService.stepPreferences(context).getLong(StepCounterService.KEY_STEPS, 0L)) }
+    var stepTracking by remember { mutableStateOf(StepCounterService.stepPreferences(context).getBoolean(StepCounterService.KEY_TRACKING, false)) }
+    var stepGoal by remember { mutableStateOf(StepCounterService.stepPreferences(context).getInt(StepCounterService.KEY_GOAL_STEPS, 8_000)) }
+    var pushupGoal by remember { mutableStateOf(DailyGoalStorage.pushupGoal(context)) }
+    var profileName by remember { mutableStateOf(ProfileStorage.name(context)) }
+    var profileHeight by remember { mutableStateOf(ProfileStorage.heightCm(context)?.toString().orEmpty()) }
+    var profileAge by remember { mutableStateOf(ProfileStorage.age(context)?.toString().orEmpty()) }
+    var manualPushupsToday by remember { mutableStateOf(DailyGoalStorage.manualPushupsToday(context)) }
+    var gpsDistanceMeters by remember { mutableDoubleStateOf(RunGpsService.preferences(context).getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()) }
+    var gpsPaceSecondsPerKm by remember { mutableDoubleStateOf(RunGpsService.preferences(context).getFloat(RunGpsService.KEY_PACE_SECONDS_PER_KM, 0f).toDouble()) }
+    var gpsTracking by remember { mutableStateOf(RunGpsService.preferences(context).getBoolean(RunGpsService.KEY_TRACKING, false)) }
+    var gpsHasFix by remember { mutableStateOf(RunGpsService.preferences(context).getBoolean(RunGpsService.KEY_HAS_FIX, false)) }
+    var gpsStatus by remember { mutableStateOf(RunGpsService.preferences(context).getString(RunGpsService.KEY_STATUS, "idle") ?: "idle") }
+    var pendingGpsStart by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var selectedTab by remember { mutableStateOf(AppTab.HOME) }
     var selectedDay by remember { mutableLongStateOf(dayStart(System.currentTimeMillis())) }
@@ -114,6 +162,7 @@ private fun WorkoutTrackerApp() {
     var showTemplateNameDialog by remember { mutableStateOf(false) }
     var templateNameDraft by remember { mutableStateOf("") }
     var pendingTemplate by remember { mutableStateOf<WorkoutTemplate?>(null) }
+    var pendingTemplateDeletion by remember { mutableStateOf<WorkoutTemplate?>(null) }
     var showRoutineBuilder by remember { mutableStateOf(false) }
     var routineBuilderStep by remember { mutableStateOf("details") }
     var routineNameDraft by remember { mutableStateOf("") }
@@ -122,6 +171,78 @@ private fun WorkoutTrackerApp() {
     var routineRestSecondsDraft by remember { mutableStateOf(90) }
     var requireActivityChoice by remember {
         mutableStateOf(workout.activityType == "Choose activity" || workout.finished)
+    }
+    val todaySteps = if (StepCounterService.stepPreferences(context).getString(StepCounterService.KEY_DATE, null) == StepCounterService.todayKey()) stepCount else 0L
+    val estimatedStepCalories = bodyWeightKg?.let {
+        ActivityCalories.estimateStepCalories(todaySteps, it, profileHeight.toIntOrNull(), profileAge.toIntOrNull())
+    } ?: 0
+    val estimatedManualPushupCalories = bodyWeightKg?.let {
+        ActivityCalories.estimatePushupCalories(manualPushupsToday, it, profileHeight.toIntOrNull(), profileAge.toIntOrNull())
+    } ?: 0
+    val startStepService = {
+        ContextCompat.startForegroundService(context, Intent(context, StepCounterService::class.java).setAction(StepCounterService.ACTION_START))
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { startStepService() }
+    val activityRecognitionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else startStepService()
+        }
+    }
+    val requestStepTracking = {
+        if (!StepCounterService.isSupported(context)) {
+            android.widget.Toast.makeText(context, "This phone does not have a step counter sensor.", android.widget.Toast.LENGTH_LONG).show()
+        } else if (Build.VERSION.SDK_INT >= 29 && ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+            activityRecognitionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+        } else if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else startStepService()
+    }
+    val toggleStepTracking = {
+        if (stepTracking) context.startService(Intent(context, StepCounterService::class.java).setAction(StepCounterService.ACTION_STOP))
+        else requestStepTracking()
+    }
+    val startRunGpsService = {
+        ContextCompat.startForegroundService(context, Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_START))
+    }
+    val runLocationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (pendingGpsStart) {
+            pendingGpsStart = false
+            val allowed = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            if (allowed) {
+                RunGpsService.resetSession(context)
+                gpsDistanceMeters = 0.0
+                gpsPaceSecondsPerKm = 0.0
+                gpsHasFix = false
+                workout = workout.startActivityTimer(now)
+                startRunGpsService()
+            } else {
+                android.widget.Toast.makeText(context, "Location permission was not granted. The run timer will start without GPS.", android.widget.Toast.LENGTH_LONG).show()
+                workout = workout.startActivityTimer(now)
+            }
+        }
+    }
+    DisposableEffect(context) {
+        val prefs = StepCounterService.stepPreferences(context)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { shared, _ ->
+            stepCount = shared.getLong(StepCounterService.KEY_STEPS, 0L)
+            stepTracking = shared.getBoolean(StepCounterService.KEY_TRACKING, false)
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    DisposableEffect(context) {
+        val prefs = RunGpsService.preferences(context)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { shared, _ ->
+            gpsDistanceMeters = shared.getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()
+            gpsPaceSecondsPerKm = shared.getFloat(RunGpsService.KEY_PACE_SECONDS_PER_KM, 0f).toDouble()
+            gpsTracking = shared.getBoolean(RunGpsService.KEY_TRACKING, false)
+            gpsHasFix = shared.getBoolean(RunGpsService.KEY_HAS_FIX, false)
+            gpsStatus = shared.getString(RunGpsService.KEY_STATUS, "idle") ?: "idle"
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
     LaunchedEffect(Unit) {
@@ -136,6 +257,7 @@ private fun WorkoutTrackerApp() {
         workout = transform(workout)
     }
     val startTemplate: (WorkoutTemplate) -> Unit = { template ->
+        context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
         workout = WorkoutStorage.newWorkout(now, workout.history, template.activityType).copy(
             title = template.name,
             sets = template.sets.mapIndexed { index, set -> set.copy(id = index + 1, completed = false) },
@@ -153,7 +275,7 @@ private fun WorkoutTrackerApp() {
         val name = rawName.trim()
         if (name.isNotEmpty()) {
             val firstId = (routineSetsDraft.maxOfOrNull { it.id } ?: 0) + 1
-            val bodyweight = name.equals("Push-up", true) || name.equals("Pull-up", true)
+            val bodyweight = isBodyweightExercise(name)
             val reps = if (bodyweight) "10" else "8"
             routineSetsDraft = routineSetsDraft + (0 until 3).map { offset ->
                 WorkoutSet(firstId + offset, name, reps, "")
@@ -194,7 +316,7 @@ private fun WorkoutTrackerApp() {
         if (name.isNotEmpty() && !workout.finished && workout.activityType == "Strength") {
             val previous = workout.sets.lastOrNull { it.exercise.equals(name, ignoreCase = true) }
             val nextId = (workout.sets.maxOfOrNull { it.id } ?: 0) + 1
-            val bodyweight = name.equals("Push-up", true) || name.equals("Pull-up", true)
+            val bodyweight = isBodyweightExercise(name)
             update { state ->
                 state.copy(
                     sets = state.sets + WorkoutSet(
@@ -262,7 +384,7 @@ private fun WorkoutTrackerApp() {
                                                         startTemplate(template)
                                                     }
                                                 },
-                                                onDelete = { templates = WorkoutStorage.deleteTemplate(context, template.name) },
+                                                onDelete = { pendingTemplateDeletion = template },
                                             )
                                         }
                                     }
@@ -277,13 +399,57 @@ private fun WorkoutTrackerApp() {
                                 requireActivityChoice = true
                                 showActivityPicker = true
                             },
-                            onStartTimer = { update { it.startActivityTimer(now) } },
+                            onStartTimer = {
+                                if (workout.activityType == "Running") {
+                                    val hasLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    if (hasLocation) {
+                                        RunGpsService.resetSession(context)
+                                        gpsDistanceMeters = 0.0
+                                        gpsPaceSecondsPerKm = 0.0
+                                        gpsHasFix = false
+                                        update { it.startActivityTimer(now) }
+                                        startRunGpsService()
+                                    } else {
+                                        RunGpsService.resetSession(context)
+                                        gpsDistanceMeters = 0.0
+                                        gpsPaceSecondsPerKm = 0.0
+                                        gpsHasFix = false
+                                        pendingGpsStart = true
+                                        runLocationPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                                    }
+                                } else update { it.startActivityTimer(now) }
+                            },
                             onRename = {
                                 draftTitle = workout.title
                                 showRenameDialog = true
                             },
-                            onTogglePause = { update { it.togglePause(now) } },
-                            onStopTimer = { update { it.stopActivityTimer(now) } },
+                            onTogglePause = {
+                                val wasPaused = workout.pausedAt > 0L
+                                update { it.togglePause(now) }
+                                if (workout.activityType == "Running") {
+                                    if (wasPaused) startRunGpsService()
+                                    else context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
+                                }
+                            },
+                            onStopTimer = {
+                                update { it.stopActivityTimer(now) }
+                                if (workout.activityType == "Running") context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
+                            },
+                            gpsDistanceMeters = gpsDistanceMeters,
+                            gpsPaceSecondsPerKm = gpsPaceSecondsPerKm,
+                            gpsTracking = gpsTracking,
+                            gpsHasFix = gpsHasFix,
+                            gpsStatus = gpsStatus,
+                            gpsCalories = bodyWeightKg?.let { ActivityCalories.estimateRunningDistanceCalories(gpsDistanceMeters, it) },
+                        )
+                    }
+                    if (!requireActivityChoice && workout.activityType != "Choose activity") item {
+                        IntensitySelector(
+                            activity = workout.activityType,
+                            intensity = workout.intensity,
+                            enabled = !workout.finished,
+                            onChange = { value -> update { it.copy(intensity = value) } },
                         )
                     }
                     if (!requireActivityChoice && workout.activityType == "Strength") item {
@@ -416,6 +582,10 @@ private fun WorkoutTrackerApp() {
                             workout = workout,
                             onFinish = {
                                 val duration = workout.elapsedMillis(now)
+                                val weightForSession = WorkoutStorage.bodyWeightBefore(context, workout.startedAt)
+                                val savedRunDistance = RunGpsService.preferences(context).getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()
+                                val runDistance = savedRunDistance.takeIf { workout.activityType == "Running" && it > 0.0 }
+                                val averagePace = runDistance?.let { distance -> duration.toDouble() / distance }
                                 val record = WorkoutRecord(
                                     title = workout.title,
                                     startedAt = workout.startedAt,
@@ -423,7 +593,23 @@ private fun WorkoutTrackerApp() {
                                     elapsedMillis = duration,
                                     sets = workout.sets,
                                     activityType = workout.activityType,
+                                    intensity = workout.intensity,
+                                    weightKg = weightForSession,
+                                    distanceMeters = runDistance,
+                                    averagePaceSecondsPerKm = averagePace,
+                                    estimatedCalories = weightForSession?.let {
+                                        if (runDistance != null) ActivityCalories.estimateRunningDistanceCalories(runDistance, it)
+                                        else ActivityCalories.estimateCalories(
+                                                workout.activityType,
+                                                workout.intensity,
+                                                it,
+                                                duration,
+                                                heightCm = ProfileStorage.heightCm(context),
+                                                ageYears = ProfileStorage.age(context),
+                                            )
+                                    },
                                 )
+                                if (workout.activityType == "Running") context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
                                 update { state ->
                                     state.copy(
                                         history = state.history + record,
@@ -443,6 +629,7 @@ private fun WorkoutTrackerApp() {
                     }
                     } else if (selectedTab == AppTab.HISTORY) {
                         item { HistoryHeader(workout.history.size) }
+                        item { PersonalRecordsCard(workout.history) }
                         item {
                             WorkoutCalendar(
                                 month = calendarMonth,
@@ -460,7 +647,7 @@ private fun WorkoutTrackerApp() {
                                 today = dayStart(now),
                             )
                         }
-                    } else {
+                    } else if (selectedTab == AppTab.HOME) {
                         item { HomeHeader(now) }
                         item {
                             HomeTodayCard(
@@ -477,7 +664,88 @@ private fun WorkoutTrackerApp() {
                                 continueWorkout = !workout.finished && workout.activityType != "Choose activity",
                             )
                         }
-                        item { HomeComingSoonCards() }
+                        item {
+                            Text("TODAY'S GOALS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                        }
+                        item {
+                            StepCounterCard(
+                                steps = todaySteps,
+                                goal = stepGoal,
+                                sensorAvailable = StepCounterService.isSupported(context),
+                                estimatedCalories = estimatedStepCalories,
+                                hasBodyWeight = bodyWeightKg != null,
+                            )
+                        }
+                        item {
+                            PushupGoalCard(
+                                completed = manualPushupsToday + workout.history
+                                    .filter { dayStart(it.startedAt) == dayStart(now) }
+                                    .sumOf { record -> pushupReps(record.sets) } +
+                                    if (!workout.finished && dayStart(workout.startedAt) == dayStart(now)) pushupReps(workout.sets) else 0,
+                                manuallyLogged = manualPushupsToday,
+                                goal = pushupGoal,
+                                onLogReps = { reps -> manualPushupsToday = DailyGoalStorage.logManualPushups(context, reps) },
+                            )
+                        }
+                        item {
+                            BodyWeightAndCaloriesCard(
+                                weightKg = bodyWeightKg,
+                                heightCm = profileHeight.toIntOrNull(),
+                                ageYears = profileAge.toIntOrNull(),
+                                history = workout.history,
+                                today = dayStart(now),
+                                additionalCalories = estimatedStepCalories + estimatedManualPushupCalories,
+                            )
+                        }
+                    } else {
+                        item { SettingsScreenHeader() }
+                        item {
+                            SettingsPersonalInfoCard(
+                                name = profileName,
+                                heightCm = profileHeight,
+                                age = profileAge,
+                                weightKg = bodyWeightKg,
+                                onSave = { name, height, age, weight ->
+                                    profileName = name
+                                    profileHeight = height
+                                    profileAge = age
+                                    ProfileStorage.save(context, name, height.toIntOrNull(), age.toIntOrNull())
+                                    bodyWeightKg = weight
+                                    WorkoutStorage.saveBodyWeightKg(context, weight)
+                                },
+                            )
+                        }
+                        item {
+                            SettingsGoalsCard(
+                                stepGoal = stepGoal,
+                                pushupGoal = pushupGoal,
+                                onStepGoalChange = { value ->
+                                    stepGoal = value.coerceIn(1_000, 50_000)
+                                    StepCounterService.stepPreferences(context).edit().putInt(StepCounterService.KEY_GOAL_STEPS, stepGoal).apply()
+                                },
+                                onPushupGoalChange = { value ->
+                                    pushupGoal = value.coerceIn(5, 1_000)
+                                    DailyGoalStorage.savePushupGoal(context, pushupGoal)
+                                },
+                            )
+                        }
+                        item {
+                            SettingsTrackingCard(
+                                tracking = stepTracking,
+                                sensorAvailable = StepCounterService.isSupported(context),
+                                locationPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED,
+                                activityPermission = Build.VERSION.SDK_INT < 29 || ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED,
+                                notificationPermission = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
+                                onToggleTracking = { toggleStepTracking() },
+                                onRequestNotifications = {
+                                    if (Build.VERSION.SDK_INT >= 33) notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                },
+                                onManagePermissions = {
+                                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                                },
+                            )
+                        }
                     }
                 }
                 AppNavigation(selectedTab = selectedTab, onSelect = {
@@ -493,28 +761,24 @@ private fun WorkoutTrackerApp() {
             onDismissRequest = { showActivityPicker = false },
             title = { Text("Choose activity", color = Ink, fontWeight = FontWeight.Bold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("This starts a new session in that mode. Unsaved edits in the current session will be cleared.", color = Muted, fontSize = 13.sp)
-                    ActivityTypes.forEach { type ->
-                        TextButton(
-                            onClick = {
-                                workout = WorkoutStorage.newWorkout(now, workout.history, type).copy(title = if (type == "Strength") "Workout" else type)
-                                requireActivityChoice = false
-                                showActivityPicker = false
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                when (type) {
-                                    "Strength" -> "🏋  Strength · reps and weight"
-                                    "Running" -> "🏃  Running"
-                                    "Cycling" -> "🚴  Cycling"
-                                    "Jogging" -> "🚶  Jogging"
-                                    else -> "⏱  Jump rope"
+                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                        items(ActivityTypes) { type ->
+                            TextButton(
+                                onClick = {
+                                    workout = WorkoutStorage.newWorkout(now, workout.history, type).copy(title = if (type == "Strength") "Workout" else type)
+                                    context.startService(Intent(context, RunGpsService::class.java).setAction(RunGpsService.ACTION_STOP))
+                                    requireActivityChoice = false
+                                    showActivityPicker = false
                                 },
-                                color = Forest,
                                 modifier = Modifier.fillMaxWidth(),
-                            )
+                            ) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    Text("${activityEmoji(type)}  $type", color = Forest, fontWeight = FontWeight.SemiBold)
+                                    if (type == "Strength") Text("Rep and weight tracking", color = Muted, fontSize = 10.sp)
+                                }
+                            }
                         }
                     }
                 }
@@ -574,6 +838,40 @@ private fun WorkoutTrackerApp() {
                                     contentPadding = PaddingValues(horizontal = 4.dp),
                                 ) { Text("Remove", color = Muted, fontSize = 10.sp) }
                             }
+                            routineSetsDraft.filter { it.exercise == exercise }.forEachIndexed { setIndex, set ->
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("${setIndex + 1}", color = Muted, fontSize = 10.sp)
+                                    NumberField(
+                                        label = "REPS",
+                                        value = set.reps,
+                                        editable = true,
+                                        onValueChange = { value ->
+                                            routineSetsDraft = routineSetsDraft.map { if (it.id == set.id) it.copy(reps = value) else it }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        onAdjust = { delta ->
+                                            val next = ((set.reps.toIntOrNull() ?: 0) + delta).coerceAtLeast(0).toString()
+                                            routineSetsDraft = routineSetsDraft.map { if (it.id == set.id) it.copy(reps = next) else it }
+                                        },
+                                    )
+                                    NumberField(
+                                        label = if (set.needsWeight()) "WEIGHT *" else "WEIGHT OPTIONAL",
+                                        value = set.weight,
+                                        editable = true,
+                                        onValueChange = { value ->
+                                            routineSetsDraft = routineSetsDraft.map { if (it.id == set.id) it.copy(weight = value) else it }
+                                        },
+                                        suffix = "kg",
+                                        modifier = Modifier.weight(1f),
+                                        allowDecimal = true,
+                                        onAdjust = { delta ->
+                                            val next = ((set.weight.toDoubleOrNull() ?: 0.0) + delta * 2.5).coerceAtLeast(0.0)
+                                            val value = if (next % 1.0 == 0.0) next.toInt().toString() else "%.1f".format(Locale.US, next)
+                                            routineSetsDraft = routineSetsDraft.map { if (it.id == set.id) it.copy(weight = value) else it }
+                                        },
+                                    )
+                                }
+                            }
                         }
                         TextButton(onClick = { routineBuilderStep = "exercise" }, modifier = Modifier.fillMaxWidth()) {
                             Text("＋  Add exercise", color = CalendarGreen, fontWeight = FontWeight.SemiBold)
@@ -587,6 +885,9 @@ private fun WorkoutTrackerApp() {
                             suffix = "sec",
                             onAdjust = { delta -> routineRestSecondsDraft = (routineRestSecondsDraft + delta * 15).coerceIn(0, 999) },
                         )
+                        if (routineSetsDraft.hasMissingRequiredWeights()) {
+                            Text("Enter a weight for every set marked * to save this routine.", color = Muted, fontSize = 11.sp)
+                        }
                     }
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -626,7 +927,7 @@ private fun WorkoutTrackerApp() {
                                 showRoutineBuilder = false
                             }
                         },
-                        enabled = routineNameDraft.isNotBlank() && routineSetsDraft.isNotEmpty(),
+                        enabled = routineNameDraft.isNotBlank() && routineSetsDraft.isNotEmpty() && !routineSetsDraft.hasMissingRequiredWeights(),
                     ) { Text("Save routine", color = Forest) }
                 } else {
                     TextButton(onClick = { routineBuilderStep = "details" }) { Text("Done", color = Forest) }
@@ -706,13 +1007,18 @@ private fun WorkoutTrackerApp() {
             onDismissRequest = { showTemplateNameDialog = false },
             title = { Text("Save routine", color = Ink, fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
-                    value = templateNameDraft,
-                    onValueChange = { templateNameDraft = it.take(40) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Routine name") },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = templateNameDraft,
+                        onValueChange = { templateNameDraft = it.take(40) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Routine name") },
+                    )
+                    if (workout.sets.hasMissingRequiredWeights()) {
+                        Text("Enter weights for weighted exercises before saving this routine.", color = Muted, fontSize = 12.sp)
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
@@ -735,7 +1041,7 @@ private fun WorkoutTrackerApp() {
                             showTemplateNameDialog = false
                         }
                     },
-                    enabled = templateNameDraft.isNotBlank(),
+                    enabled = templateNameDraft.isNotBlank() && !workout.sets.hasMissingRequiredWeights(),
                 ) { Text("Save", color = Forest) }
             },
             dismissButton = { TextButton(onClick = { showTemplateNameDialog = false }) { Text("Cancel", color = Muted) } },
@@ -756,6 +1062,25 @@ private fun WorkoutTrackerApp() {
                 ) { Text("Start routine", color = Forest) }
             },
             dismissButton = { TextButton(onClick = { pendingTemplate = null }) { Text("Cancel", color = Muted) } },
+        )
+    }
+
+    pendingTemplateDeletion?.let { template ->
+        AlertDialog(
+            onDismissRequest = { pendingTemplateDeletion = null },
+            title = { Text("Remove saved routine?", color = Ink, fontWeight = FontWeight.Bold) },
+            text = { Text("${template.name} will be removed from your saved workouts.", color = Muted, fontSize = 13.sp) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        templates = WorkoutStorage.deleteTemplate(context, template.name)
+                        pendingTemplateDeletion = null
+                    },
+                ) { Text("Remove", color = Color(0xFF9B3F3F)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTemplateDeletion = null }) { Text("Cancel", color = Muted) }
+            },
         )
     }
 }
@@ -837,6 +1162,110 @@ private fun TopBar() {
 }
 
 @Composable
+private fun SettingsScreenHeader() {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("Settings", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("Personalize your profile, goals, and tracking.", color = Muted, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun SettingsPersonalInfoCard(
+    name: String,
+    heightCm: String,
+    age: String,
+    weightKg: Double?,
+    onSave: (String, String, String, Double?) -> Unit,
+) {
+    var draftName by remember(name) { mutableStateOf(name) }
+    var draftHeight by remember(heightCm) { mutableStateOf(heightCm) }
+    var draftAge by remember(age) { mutableStateOf(age) }
+    var draftWeight by remember(weightKg) { mutableStateOf(weightKg?.toString().orEmpty()) }
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("PERSONAL INFO", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            OutlinedTextField(draftName, { draftName = it }, label = { Text("Name (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(draftHeight, { draftHeight = it.filter(Char::isDigit).take(3) }, label = { Text("Height · cm") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                OutlinedTextField(draftAge, { draftAge = it.filter(Char::isDigit).take(3) }, label = { Text("Age") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+            }
+            OutlinedTextField(draftWeight, { draftWeight = it.filter { ch -> ch.isDigit() || ch == '.' }.take(6) }, label = { Text("Body weight · kg") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+            Text("Stored on this device. Weight is used for workout calorie estimates.", color = Muted, fontSize = 11.sp)
+            Button(onClick = {
+                val height = draftHeight.toIntOrNull()?.takeIf { it in 80..250 }?.toString().orEmpty()
+                val ageValue = draftAge.toIntOrNull()?.takeIf { it in 13..120 }?.toString().orEmpty()
+                draftHeight = height
+                draftAge = ageValue
+                onSave(draftName.trim(), height, ageValue, draftWeight.toDoubleOrNull()?.takeIf { it in 20.0..350.0 })
+            }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.buttonColors(containerColor = Forest)) {
+                Text("Save personal info")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsGoalsCard(
+    stepGoal: Int,
+    pushupGoal: Int,
+    onStepGoalChange: (Int) -> Unit,
+    onPushupGoalChange: (Int) -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("DAILY GOALS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            GoalSettingRow("Steps", stepGoal, "steps", 500, 1_000, 50_000, onStepGoalChange)
+            GoalSettingRow("Push-ups", pushupGoal, "reps", 5, 5, 1_000, onPushupGoalChange)
+            Text("Progress stays visible on Home. Push-up sets in workouts count automatically.", color = Muted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun GoalSettingRow(label: String, value: Int, unit: String, increment: Int, minimum: Int, maximum: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("${value} $unit per day", color = Muted, fontSize = 12.sp)
+        }
+        TextButton(onClick = { onChange((value - increment).coerceAtLeast(minimum)) }) { Text("−", color = Forest, fontSize = 20.sp) }
+        TextButton(onClick = { onChange((value + increment).coerceAtMost(maximum)) }) { Text("＋", color = Forest, fontSize = 20.sp) }
+    }
+}
+
+@Composable
+private fun SettingsTrackingCard(
+    tracking: Boolean,
+    sensorAvailable: Boolean,
+    locationPermission: Boolean,
+    activityPermission: Boolean,
+    notificationPermission: Boolean,
+    onToggleTracking: () -> Unit,
+    onRequestNotifications: () -> Unit,
+    onManagePermissions: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("STEP TRACKING & PERMISSIONS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Text(if (tracking) "Step tracking is active in the background." else "Step tracking is paused.", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Step sensor: ${if (sensorAvailable) "Available" else "Not available on this device"}", color = Muted, fontSize = 12.sp)
+            Text("Run GPS permission: ${if (locationPermission) "Allowed" else "Ask when starting a run"}", color = Muted, fontSize = 12.sp)
+            Text("Physical activity permission: ${if (activityPermission) "Allowed" else "Not allowed"}", color = Muted, fontSize = 12.sp)
+            Text("Notifications: ${if (notificationPermission) "Allowed / not required" else "Not allowed"}", color = Muted, fontSize = 12.sp)
+            Button(onClick = onToggleTracking, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.buttonColors(containerColor = Forest), enabled = sensorAvailable) {
+                Text(if (tracking) "Pause step tracking" else "Enable background step tracking")
+            }
+            if (!notificationPermission) TextButton(onClick = onRequestNotifications, modifier = Modifier.fillMaxWidth()) {
+                Text("Allow notifications", color = Forest)
+            }
+            TextButton(onClick = onManagePermissions, modifier = Modifier.fillMaxWidth()) {
+                Text("Manage app permissions in Android settings", color = Forest)
+            }
+        }
+    }
+}
+
+@Composable
 private fun AppNavigation(selectedTab: AppTab, onSelect: (AppTab) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().background(Canvas).padding(horizontal = 16.dp, vertical = 6.dp),
@@ -845,6 +1274,7 @@ private fun AppNavigation(selectedTab: AppTab, onSelect: (AppTab) -> Unit) {
         NavigationButton("Home", selectedTab == AppTab.HOME, Modifier.weight(1f)) { onSelect(AppTab.HOME) }
         NavigationButton("Workout", selectedTab == AppTab.WORKOUT, Modifier.weight(1f)) { onSelect(AppTab.WORKOUT) }
         NavigationButton("History", selectedTab == AppTab.HISTORY, Modifier.weight(1f)) { onSelect(AppTab.HISTORY) }
+        NavigationButton("Settings", selectedTab == AppTab.SETTINGS, Modifier.weight(1f)) { onSelect(AppTab.SETTINGS) }
     }
 }
 
@@ -897,6 +1327,12 @@ private fun WorkoutStartCard(
     onRename: () -> Unit,
     onTogglePause: () -> Unit,
     onStopTimer: () -> Unit,
+    gpsDistanceMeters: Double,
+    gpsPaceSecondsPerKm: Double,
+    gpsTracking: Boolean,
+    gpsHasFix: Boolean,
+    gpsStatus: String,
+    gpsCalories: Int?,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val intervalLabel = if (workout.cardioMode == "stopwatch") {
@@ -1015,8 +1451,45 @@ private fun WorkoutStartCard(
                     ) { Text("Stop", color = Color.White, fontSize = 12.sp) }
                 }
             }
+            if (workout.activityType == "Running" && workout.timerStarted && !workout.timerStopped) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 0.dp).padding(bottom = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                ) {
+                    Column {
+                        Text("DISTANCE", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text("${"%.2f".format(Locale.US, gpsDistanceMeters / 1_000.0)} km", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Column {
+                        Text("PACE", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(if (gpsPaceSecondsPerKm > 0) formatPace(gpsPaceSecondsPerKm) else "—:— /km", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Column {
+                        Text("CALORIES", color = Color(0xFFBFC3C5), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(gpsCalories?.let { "~$it kcal" } ?: "— kcal", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                Text(
+                    when {
+                        gpsHasFix && gpsDistanceMeters > 0 -> if (gpsTracking) "Location recording" else "Location paused"
+                        gpsStatus == "location_disabled" -> "Turn on device location to track this run"
+                        gpsTracking -> "Waiting for GPS signal…"
+                        else -> "GPS unavailable · timer still works"
+                    },
+                    Modifier.padding(start = 20.dp, end = 20.dp, bottom = 13.dp),
+                    color = Color(0xFFCFD2D3),
+                    fontSize = 11.sp,
+                )
+            }
         }
     }
+}
+
+private fun formatPace(secondsPerKm: Double): String {
+    if (!secondsPerKm.isFinite() || secondsPerKm <= 0) return "—:— /km"
+    val totalSeconds = secondsPerKm.toInt()
+    return "${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')} /km"
 }
 
 @Composable
@@ -1138,7 +1611,7 @@ private fun ExerciseGroupCard(
                         onAdjust = { delta -> onRepsChange(set, ((set.reps.toIntOrNull() ?: 0) + delta).coerceAtLeast(0).toString()) },
                     )
                     NumberField(
-                        label = "WEIGHT",
+                        label = if (set.needsWeight()) "WEIGHT *" else "WEIGHT OPTIONAL",
                         value = set.weight,
                         editable = editable,
                         onValueChange = { onWeightChange(set, it) },
@@ -1152,7 +1625,7 @@ private fun ExerciseGroupCard(
                     )
                     Button(
                         onClick = { onComplete(set) },
-                        enabled = editable,
+                        enabled = editable && (!set.needsWeight() || set.weight.toDoubleOrNull() != null),
                         modifier = Modifier.size(width = 40.dp, height = 48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = if (set.completed) SoftGreen else Forest, contentColor = if (set.completed) Forest else Color.White),
@@ -1283,6 +1756,7 @@ private fun RestTimerSettings(seconds: Int, editable: Boolean, onChange: (Int) -
 private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
     val completed = workout.sets.count { it.completed }
     val strength = workout.activityType == "Strength"
+    val missingWeights = strength && workout.sets.hasMissingRequiredWeights()
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().background(SoftGreen, RoundedCornerShape(15.dp)).padding(14.dp),
@@ -1304,7 +1778,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
         if (!workout.finished) {
             Button(
                 onClick = onFinish,
-                enabled = !strength || completed > 0,
+                enabled = !strength || (completed > 0 && !missingWeights),
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Forest),
@@ -1312,6 +1786,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
                 Text(
                     when {
                         !strength -> "Finish ${workout.activityType.lowercase(Locale.getDefault())}"
+                        missingWeights -> "Enter weights for weighted exercises"
                         completed > 0 -> "Finish workout  ·  $completed / ${workout.sets.size} sets done"
                         else -> "Complete a set to finish"
                     },
@@ -1328,6 +1803,40 @@ private fun HistoryHeader(count: Int) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Your calendar", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Text("$count ${if (count == 1) "workout" else "workouts"} saved on this device", color = Muted, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun PersonalRecordsCard(history: List<WorkoutRecord>) {
+    val bestByExercise = history.asSequence()
+        .filter { it.activityType == "Strength" }
+        .flatMap { record -> record.sets.asSequence().filter { it.completed }.map { record to it } }
+        .mapNotNull { (record, set) ->
+            val weight = set.weight.toDoubleOrNull()?.takeIf { it > 0.0 } ?: return@mapNotNull null
+            Triple(set.exercise, weight, set.reps to record.startedAt)
+        }
+        .groupBy { it.first }
+        .mapValues { (_, attempts) -> attempts.maxBy { it.second } }
+        .values
+        .sortedByDescending { it.second }
+        .take(5)
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("PERSONAL RECORDS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            if (bestByExercise.isEmpty()) {
+                Text("Complete a weighted set to start tracking your lift records.", color = Muted, fontSize = 12.sp)
+            } else {
+                bestByExercise.forEach { (exercise, weight, detail) ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(exercise, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text("${detail.first} reps · ${SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(detail.second))}", color = Muted, fontSize = 10.sp)
+                        }
+                        Text("${"%.1f".format(Locale.US, weight).trimEnd('0').trimEnd('.')} kg", color = Forest, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1393,24 +1902,153 @@ private fun HomeMetric(value: String, label: String) {
     }
 }
 
+private fun isPushupExercise(name: String): Boolean =
+    name.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }.contains("pushup")
+
+private fun pushupReps(sets: List<WorkoutSet>): Int = sets
+    .filter { it.completed && isPushupExercise(it.exercise) }
+    .sumOf { it.reps.toIntOrNull()?.coerceAtLeast(0) ?: 0 }
+
 @Composable
-private fun HomeComingSoonCards() {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Card(colors = CardDefaults.cardColors(containerColor = SoftGreen), shape = RoundedCornerShape(18.dp)) {
-            Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("TODAY'S GOALS", color = Forest, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-                Text("Your goals will live here", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Text("Workout targets and gentle progress cues are coming next.", color = Muted, fontSize = 12.sp)
+private fun PushupGoalCard(
+    completed: Int,
+    manuallyLogged: Int,
+    goal: Int,
+    onLogReps: (Int) -> Unit,
+) {
+    val progress = (completed.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("PUSH-UPS TODAY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                    Text("$completed / $goal", color = Ink, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                }
             }
-        }
-        Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
-            Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("CALORIES BURNED", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-                Text("— kcal", color = Ink, fontWeight = FontWeight.Bold, fontSize = 22.sp)
-                Text("Estimated calories will appear after profile and weigh-in details are added.", color = Muted, fontSize = 12.sp)
+            Box(Modifier.fillMaxWidth().height(8.dp).background(Canvas, CircleShape)) {
+                Box(Modifier.fillMaxWidth(progress).height(8.dp).background(CalendarGreen, CircleShape))
             }
+            Text("${(progress * 100).toInt()}% of daily push-up goal", color = Muted, fontSize = 11.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onLogReps(5) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Forest),
+                ) { Text("＋ 5 reps") }
+                Button(
+                    onClick = { onLogReps(10) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Forest),
+                ) { Text("＋ 10 reps") }
+                TextButton(onClick = { onLogReps(-5) }, enabled = manuallyLogged >= 5) { Text("Undo 5", color = Muted, fontSize = 10.sp) }
+            }
+            Text("Completed push-up sets in workouts count automatically. Use quick-add for reps done outside a workout.", color = Muted, fontSize = 10.sp)
         }
     }
+}
+
+@Composable
+private fun StepCounterCard(
+    steps: Long,
+    goal: Int,
+    sensorAvailable: Boolean,
+    estimatedCalories: Int,
+    hasBodyWeight: Boolean,
+) {
+    val progress = (steps.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("STEPS TODAY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("${steps.toString().reversed().chunked(3).joinToString(",").reversed()}", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Text(if (hasBodyWeight) "~$estimatedCalories kcal walked today" else "Add body weight in Settings to estimate walking calories", color = Forest, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Box(Modifier.fillMaxWidth().height(8.dp).background(Canvas, CircleShape)) {
+                Box(Modifier.fillMaxWidth(progress).height(8.dp).background(CalendarGreen, CircleShape))
+            }
+            Text("${(progress * 100).toInt()}% of ${goal.toString().reversed().chunked(3).joinToString(",").reversed()} step goal", color = Muted, fontSize = 11.sp)
+            if (!sensorAvailable) Text("This phone has no step counter sensor.", color = Muted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun BodyWeightAndCaloriesCard(
+    weightKg: Double?,
+    heightCm: Int?,
+    ageYears: Int?,
+    history: List<WorkoutRecord>,
+    today: Long,
+    additionalCalories: Int,
+) {
+    val calories = history.filter { dayStart(it.startedAt) == today }.sumOf { it.estimatedCalories ?: 0 } + additionalCalories
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("CALORIES BURNED TODAY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Text(if (weightKg == null) "— kcal" else "~$calories kcal", color = Ink, fontWeight = FontWeight.Bold, fontSize = 25.sp)
+            val estimateBasis = when {
+                weightKg == null -> "Add your weight in Settings to estimate calories."
+                heightCm == null || ageYears == null -> "Add height and age in Settings for a personalized estimate."
+                else -> "Estimate uses your saved weight, height, and age with activity MET values."
+            }
+            Text(estimateBasis, color = Muted, fontSize = 12.sp)
+            Text("Today's total adds finished workouts, step-based walking, and quick-logged push-ups. Step estimates assume a height-based step length and brisk walking; push-ups assume 30 reps/min. Estimates are approximate and may overlap a separately logged walking workout.", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun IntensitySelector(activity: String, intensity: String, enabled: Boolean, onChange: (String) -> Unit) {
+    val met = ActivityCalories.activities.firstOrNull { it.name == activity }?.metFor(intensity)
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(17.dp)) {
+        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("EFFORT FOR CALORIE ESTIMATE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("light", "moderate", "vigorous").forEach { level ->
+                    val selected = intensity == level
+                    Text(
+                        level.replaceFirstChar { it.uppercase() },
+                        modifier = Modifier.weight(1f).background(if (selected) SoftGreen else Canvas, RoundedCornerShape(10.dp))
+                            .clickable(enabled = enabled) { onChange(level) }.padding(vertical = 11.dp),
+                        color = if (selected) Forest else Muted,
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+            Text("Choose the effort you sustained for most of the session.", color = Muted, fontSize = 11.sp)
+            met?.let { Text("${"%.1f".format(Locale.US, it)} MET · 2024 Adult Compendium", color = Forest, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+        }
+    }
+}
+
+private fun activityEmoji(activity: String): String = when (activity) {
+    "Strength" -> "🏋"
+    "Running", "Jogging" -> "🏃"
+    "Cycling" -> "🚴"
+    "Swimming" -> "🏊"
+    "Walking", "Hiking" -> "🚶"
+    "Yoga" -> "🧘"
+    "Basketball" -> "🏀"
+    "Soccer" -> "⚽"
+    "Tennis", "Badminton" -> "🏸"
+    "Boxing" -> "🥊"
+    "Volleyball" -> "🏐"
+    "Table Tennis" -> "🏓"
+    "Pilates" -> "🧘"
+    "Cricket" -> "🏏"
+    "Squash", "Racquetball" -> "🎾"
+    "Martial Arts", "Kickboxing" -> "🥋"
+    "Tai Chi" -> "🧘"
+    "Dance" -> "💃"
+    "Rowing" -> "🚣"
+    "Jump Rope", "HIIT", "Elliptical", "Stair Climbing" -> "⏱"
+    else -> "🏃"
 }
 
 private fun dayStart(time: Long): Long = Calendar.getInstance().apply {
@@ -1581,6 +2219,24 @@ private fun HistoryCard(record: WorkoutRecord) {
                 color = Muted,
                 fontSize = 12.sp,
             )
+            record.estimatedCalories?.let { kcal ->
+                Text(
+                    if (record.distanceMeters != null) "~$kcal kcal · distance-based estimate" else "~$kcal kcal · ${record.intensity} effort",
+                    color = Forest,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                )
+                record.weightKg?.let { weight -> Text("Estimate used ${"%.1f".format(Locale.US, weight)} kg body weight", color = Muted, fontSize = 10.sp) }
+            }
+            record.distanceMeters?.takeIf { it > 0 }?.let { distance ->
+                val pace = record.averagePaceSecondsPerKm
+                Text(
+                    "${"%.2f".format(Locale.US, distance / 1_000.0)} km${pace?.let { " · ${formatPace(it)} average" } ?: ""}",
+                    color = Forest,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                )
+            }
             if (hasSets) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text("${completedSets.size} sets", color = Forest, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)

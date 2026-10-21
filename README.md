@@ -11,10 +11,13 @@ Open this folder in Android Studio and let Gradle sync. The project targets Andr
 ## Current slice
 
 - Native Kotlin and Jetpack Compose app
-- Activity-first workout setup for strength, running, cycling, and jogging
+- Activity-first workout setup with strength logging and multiple timed cardio, fitness, and sport activities
+- Expanded activity catalog with effort-adjustable calorie estimates based on the 2024 Adult Compendium; see [the estimation method](docs/calorie-estimates.md)
+- Optional background phone step counter with an adjustable daily step goal
+- Locally saved daily body-weight entries; a workout uses the latest weigh-in from before its start time
 - Cardio interval countdowns with setup, repeating work/rest and audible cues, plus a continuous stopwatch mode; rep and optional weight sets for strength
 - Offline active workout and history persistence on device
-- Starter and custom exercises, editable reps and optional weight, and quick set steppers
+- Starter and custom exercises, editable reps, required weights for weighted lifts, optional weights for bodyweight exercises, and quick set steppers
 - Copy the previous set, complete sets with one tap, and use the rest timer
 - Create strength routines from the Workout chooser or save a current workout, including set entries and the rest timer setting
 - Pause and resume the session clock and rest timer

@@ -3,6 +3,7 @@ package com.varun.workouttracker
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Calendar
 
 data class WorkoutSet(
     val id: Int,
@@ -19,6 +20,11 @@ data class WorkoutRecord(
     val elapsedMillis: Long,
     val sets: List<WorkoutSet>,
     val activityType: String = "Strength",
+    val intensity: String = "moderate",
+    val weightKg: Double? = null,
+    val estimatedCalories: Int? = null,
+    val distanceMeters: Double? = null,
+    val averagePaceSecondsPerKm: Double? = null,
 )
 
 data class WorkoutTemplate(
@@ -55,12 +61,51 @@ data class WorkoutState(
     val pausedIntervalRemaining: Long = 0L,
     val intervalRound: Int = 1,
     val cardioMode: String = "intervals",
+    val intensity: String = "moderate",
 )
 
 object WorkoutStorage {
     private const val PREFS = "workout_tracker_local"
     private const val STATE_KEY = "active_workout"
     private const val TEMPLATES_KEY = "workout_templates"
+    private const val BODY_WEIGHT_KEY = "body_weight_kg"
+    private const val WEIGH_INS_KEY = "body_weight_entries"
+
+    fun loadBodyWeightKg(context: Context): Double? = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getString(BODY_WEIGHT_KEY, null)?.toDoubleOrNull()?.takeIf { it > 0.0 }
+        ?: loadWeighIns(context).maxByOrNull { it.first }?.second
+
+    fun saveBodyWeightKg(context: Context, value: Double?) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val validWeight = value?.takeIf { it in 20.0..350.0 }
+        val editor = prefs.edit().putString(BODY_WEIGHT_KEY, validWeight?.toString())
+        if (validWeight != null) {
+            val now = System.currentTimeMillis()
+            val day = Calendar.getInstance().apply { timeInMillis = now; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+            val entries = loadWeighIns(context).filterNot { entry ->
+                val entryDay = Calendar.getInstance().apply { timeInMillis = entry.first; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+                entryDay == day
+            } + (now to validWeight)
+            val rows = JSONArray().apply { entries.sortedBy { it.first }.forEach { (timestamp, kg) -> put(JSONObject().put("time", timestamp).put("kg", kg)) } }
+            editor.putString(WEIGH_INS_KEY, rows.toString())
+        }
+        editor.apply()
+    }
+
+    fun bodyWeightBefore(context: Context, time: Long): Double? =
+        loadWeighIns(context).filter { it.first <= time }.maxByOrNull { it.first }?.second
+
+    private fun loadWeighIns(context: Context): List<Pair<Long, Double>> {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(WEIGH_INS_KEY, null) ?: return emptyList()
+        val rows = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { index ->
+            runCatching {
+                val row = rows.getJSONObject(index)
+                val kg = row.getDouble("kg")
+                row.getLong("time") to kg
+            }.getOrNull()
+        }
+    }
 
     fun loadTemplates(context: Context): List<WorkoutTemplate> {
         val rows = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -150,6 +195,11 @@ object WorkoutStorage {
                                 elapsedMillis = record.optLong("elapsedMillis", record.getLong("endedAt") - record.getLong("startedAt")),
                                 sets = readSets(record.getJSONArray("sets")),
                                 activityType = record.optString("activityType", "Strength"),
+                                intensity = record.optString("intensity", "moderate"),
+                                weightKg = if (record.has("weightKg") && !record.isNull("weightKg")) record.optDouble("weightKg") else null,
+                                estimatedCalories = if (record.has("estimatedCalories") && !record.isNull("estimatedCalories")) record.optInt("estimatedCalories") else null,
+                                distanceMeters = if (record.has("distanceMeters") && !record.isNull("distanceMeters")) record.optDouble("distanceMeters") else null,
+                                averagePaceSecondsPerKm = if (record.has("averagePaceSecondsPerKm") && !record.isNull("averagePaceSecondsPerKm")) record.optDouble("averagePaceSecondsPerKm") else null,
                             )
                         },
                         finished = root.optBoolean("finished", false),
@@ -164,6 +214,7 @@ object WorkoutStorage {
                         pausedIntervalRemaining = root.optLong("pausedIntervalRemaining", 0L),
                         intervalRound = root.optInt("intervalRound", 1),
                         cardioMode = root.optString("cardioMode", "intervals"),
+                        intensity = root.optString("intensity", "moderate"),
                     )
                 }
             }
@@ -181,7 +232,12 @@ object WorkoutStorage {
                     .put("endedAt", record.endedAt)
                     .put("elapsedMillis", record.elapsedMillis)
                     .put("sets", writeSets(record.sets))
-                    .put("activityType", record.activityType),
+                    .put("activityType", record.activityType)
+                    .put("intensity", record.intensity)
+                    .put("weightKg", record.weightKg)
+                    .put("estimatedCalories", record.estimatedCalories)
+                    .put("distanceMeters", record.distanceMeters)
+                    .put("averagePaceSecondsPerKm", record.averagePaceSecondsPerKm),
             )
         }
         val value = JSONObject()
@@ -205,6 +261,7 @@ object WorkoutStorage {
             .put("pausedIntervalRemaining", state.pausedIntervalRemaining)
             .put("intervalRound", state.intervalRound)
             .put("cardioMode", state.cardioMode)
+            .put("intensity", state.intensity)
             .put("sets", writeSets(state.sets))
             .put("history", records)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -225,6 +282,7 @@ object WorkoutStorage {
         activityType = activityType,
         sets = emptyList(),
         timerStarted = activityType == "Strength",
+        cardioMode = if (activityType in setOf("Jump Rope", "HIIT")) "intervals" else "stopwatch",
         runtimeMinutes = if (activityType == "Jump Rope") "3" else "30",
         restMinutes = if (activityType == "Jump Rope") "2" else "5",
     )
