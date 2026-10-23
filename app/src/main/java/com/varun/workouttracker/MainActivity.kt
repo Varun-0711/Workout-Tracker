@@ -139,6 +139,7 @@ private fun WorkoutTrackerApp() {
     var bodyWeightKg by remember { mutableStateOf(WorkoutStorage.loadBodyWeightKg(context)) }
     var stepCount by remember { mutableLongStateOf(StepCounterService.stepPreferences(context).getLong(StepCounterService.KEY_STEPS, 0L)) }
     var stepTracking by remember { mutableStateOf(StepCounterService.stepPreferences(context).getBoolean(StepCounterService.KEY_TRACKING, false)) }
+    var stepStatus by remember { mutableStateOf(StepCounterService.stepPreferences(context).getString(StepCounterService.KEY_STATUS, "idle") ?: "idle") }
     var stepGoal by remember { mutableStateOf(StepCounterService.stepPreferences(context).getInt(StepCounterService.KEY_GOAL_STEPS, 8_000)) }
     var pushupGoal by remember { mutableStateOf(DailyGoalStorage.pushupGoal(context)) }
     var profileName by remember { mutableStateOf(ProfileStorage.name(context)) }
@@ -233,6 +234,7 @@ private fun WorkoutTrackerApp() {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { shared, _ ->
             stepCount = shared.getLong(StepCounterService.KEY_STEPS, 0L)
             stepTracking = shared.getBoolean(StepCounterService.KEY_TRACKING, false)
+            stepStatus = shared.getString(StepCounterService.KEY_STATUS, "idle") ?: "idle"
         }
         prefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
@@ -730,6 +732,7 @@ private fun WorkoutTrackerApp() {
                         item {
                             SettingsTrackingCard(
                                 tracking = stepTracking,
+                                status = stepStatus,
                                 sensorAvailable = StepCounterService.isSupported(context),
                                 locationPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                                     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED,
@@ -1234,6 +1237,7 @@ private fun GoalSettingRow(label: String, value: Int, unit: String, increment: I
 @Composable
 private fun SettingsTrackingCard(
     tracking: Boolean,
+    status: String,
     sensorAvailable: Boolean,
     locationPermission: Boolean,
     activityPermission: Boolean,
@@ -1245,7 +1249,18 @@ private fun SettingsTrackingCard(
     Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text("STEP TRACKING & PERMISSIONS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Text(if (tracking) "Step tracking is active in the background." else "Step tracking is paused.", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                when {
+                    tracking -> "Step tracking is active in the background."
+                    status == "permission_denied" -> "Allow physical activity access to track steps."
+                    status == "sensor_unavailable" -> "This phone does not provide a step counter sensor."
+                    status == "sensor_registration_failed" -> "The phone could not start its step sensor. Try enabling tracking again."
+                    else -> "Step tracking is paused."
+                },
+                color = Ink,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
             Text("Step sensor: ${if (sensorAvailable) "Available" else "Not available on this device"}", color = Muted, fontSize = 12.sp)
             Text("Outdoor activity GPS: ${if (locationPermission) "Allowed" else "Ask when starting an activity"}", color = Muted, fontSize = 12.sp)
             Text("Physical activity permission: ${if (activityPermission) "Allowed" else "Not allowed"}", color = Muted, fontSize = 12.sp)

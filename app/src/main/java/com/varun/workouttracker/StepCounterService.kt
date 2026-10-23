@@ -27,6 +27,7 @@ class StepCounterService : Service(), SensorEventListener {
     private var sensorManager: SensorManager? = null
     private var lastSensorTotal = -1L
     private var stepsToday = 0L
+    private var receiverRegistered = false
 
     override fun onCreate() {
         super.onCreate()
@@ -37,6 +38,7 @@ class StepCounterService : Service(), SensorEventListener {
         val today = todayKey()
         if (prefs.getString(KEY_DATE, null) != today) {
             stepsToday = 0L
+            // Keep the sensor's cumulative total across midnight. Reset only today's count.
             prefs.edit().putString(KEY_DATE, today).putLong(KEY_STEPS, 0L).apply()
         } else {
             stepsToday = prefs.getLong(KEY_STEPS, 0L)
@@ -65,19 +67,28 @@ class StepCounterService : Service(), SensorEventListener {
                 Manifest.permission.ACTIVITY_RECOGNITION,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).apply()
+            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).putString(KEY_STATUS, "permission_denied").apply()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
 
         val sensor = stepSensor
         if (sensor == null) {
-            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).putBoolean(KEY_SENSOR_AVAILABLE, false).apply()
+            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).putBoolean(KEY_SENSOR_AVAILABLE, false).putString(KEY_STATUS, "sensor_unavailable").apply()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        stepPreferences(this).edit().putBoolean(KEY_TRACKING, true).putBoolean(KEY_SENSOR_AVAILABLE, true).apply()
-        sensorManager?.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        stepPreferences(this).edit().putBoolean(KEY_TRACKING, true).putBoolean(KEY_SENSOR_AVAILABLE, true).putString(KEY_STATUS, "starting").apply()
+        sensorManager?.unregisterListener(this)
+        val registered = sensorManager?.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL) == true
+        if (!registered) {
+            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).putString(KEY_STATUS, "sensor_registration_failed").apply()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 
@@ -87,7 +98,9 @@ class StepCounterService : Service(), SensorEventListener {
         val today = todayKey()
         if (prefs.getString(KEY_DATE, null) != today) {
             stepsToday = 0L
-            lastSensorTotal = rawTotal
+            // Sensor total is cumulative since reboot; retaining its baseline avoids losing
+            // steps taken after midnight when the service was not active at that moment.
+            if (lastSensorTotal < 0L || rawTotal < lastSensorTotal) lastSensorTotal = rawTotal
         } else if (lastSensorTotal < 0L) {
             lastSensorTotal = rawTotal
         } else if (rawTotal >= lastSensorTotal) {
@@ -102,6 +115,7 @@ class StepCounterService : Service(), SensorEventListener {
             .putString(KEY_DATE, today)
             .putLong(KEY_STEPS, stepsToday)
             .putLong(KEY_RAW_TOTAL, lastSensorTotal)
+            .putString(KEY_STATUS, "active")
             .apply()
         getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
     }
@@ -151,6 +165,7 @@ class StepCounterService : Service(), SensorEventListener {
         const val KEY_RAW_TOTAL = "sensor_total"
         const val KEY_TRACKING = "tracking_enabled"
         const val KEY_SENSOR_AVAILABLE = "sensor_available"
+        const val KEY_STATUS = "tracking_status"
         const val KEY_GOAL_STEPS = "goal_steps"
         private const val CHANNEL_ID = "step_tracking"
         private const val NOTIFICATION_ID = 4102
