@@ -140,7 +140,7 @@ class StepCounterService : Service(), SensorEventListener {
         val count = stepPreferences(this).getLong(KEY_STEPS, stepsToday)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         return builder
-            .setSmallIcon(android.R.drawable.ic_menu_directions)
+            .setSmallIcon(R.drawable.ic_step_tracking_notification)
             .setContentTitle("Step tracking is on")
             .setContentText("$count steps today · tap to open Workout Tracker")
             .setContentIntent(pendingIntent)
