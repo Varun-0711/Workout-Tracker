@@ -449,7 +449,16 @@ private fun WorkoutTrackerApp() {
                             gpsHasFix = gpsHasFix,
                             gpsStatus = gpsStatus,
                             gpsActivityType = workout.activityType,
-                            gpsCalories = bodyWeightKg?.let { ActivityCalories.estimateDistanceCalories(workout.activityType, gpsDistanceMeters, it) },
+                            gpsCalories = bodyWeightKg?.let {
+                                ActivityCalories.estimateOutdoorCalories(
+                                    workout.activityType,
+                                    gpsPaceSecondsPerKm,
+                                    it,
+                                    workout.elapsedMillis(now),
+                                    profileHeight.toIntOrNull(),
+                                    profileAge.toIntOrNull(),
+                                )
+                            },
                         )
                     }
                     if (!requireActivityChoice && workout.activityType == "Strength") item {
@@ -497,6 +506,22 @@ private fun WorkoutTrackerApp() {
                                     )
                                 }
                             },
+                        )
+                    }
+                    if (!requireActivityChoice && workout.activityType == "Jump Rope") item {
+                        JumpCountCard(
+                            jumpCount = workout.jumpCount,
+                            editable = !workout.finished,
+                            calories = bodyWeightKg?.let {
+                                ActivityCalories.estimateJumpRopeCalories(
+                                    workout.jumpCount.toIntOrNull() ?: 0,
+                                    workout.elapsedMillis(now),
+                                    it,
+                                    profileHeight.toIntOrNull(),
+                                    profileAge.toIntOrNull(),
+                                )
+                            },
+                            onChange = { value -> update { it.copy(jumpCount = value) } },
                         )
                     }
                     val restSeconds = when {
@@ -597,8 +622,22 @@ private fun WorkoutTrackerApp() {
                                     weightKg = weightForSession,
                                     distanceMeters = runDistance,
                                     averagePaceSecondsPerKm = averagePace,
+                                    jumpCount = if (workout.activityType == "Jump Rope") workout.jumpCount.toIntOrNull() else null,
                                     estimatedCalories = weightForSession?.let {
-                                        if (runDistance != null) ActivityCalories.estimateDistanceCalories(workout.activityType, runDistance, it)
+                                        if (workout.activityType == "Jump Rope") ActivityCalories.estimateJumpRopeCalories(
+                                            workout.jumpCount.toIntOrNull() ?: 0,
+                                            duration,
+                                            it,
+                                            ProfileStorage.heightCm(context),
+                                            ProfileStorage.age(context),
+                                        ) else if (runDistance != null) ActivityCalories.estimateOutdoorCalories(
+                                            workout.activityType,
+                                            averagePace ?: 0.0,
+                                            it,
+                                            duration,
+                                            ProfileStorage.heightCm(context),
+                                            ProfileStorage.age(context),
+                                        )
                                         else ActivityCalories.estimateCalories(
                                                 workout.activityType,
                                                 workout.intensity,
@@ -1572,6 +1611,36 @@ private fun CardioTimerSettings(
 }
 
 @Composable
+private fun JumpCountCard(
+    jumpCount: String,
+    editable: Boolean,
+    calories: Int?,
+    onChange: (String) -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("JUMP ROPE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                NumberField(
+                    label = "TOTAL JUMPS",
+                    value = jumpCount,
+                    editable = editable,
+                    onValueChange = onChange,
+                    suffix = "jumps",
+                    modifier = Modifier.weight(1f),
+                    onAdjust = { delta -> onChange(((jumpCount.toIntOrNull() ?: 0) + delta * 10).coerceAtLeast(0).toString()) },
+                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("EST. CALORIES", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(calories?.let { "~$it kcal" } ?: "— kcal", color = Forest, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Text("Jump count and session time estimate your skipping rate and calorie burn.", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
 private fun SectionHeading(title: String, trailing: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -2229,6 +2298,9 @@ private fun HistoryCard(record: WorkoutRecord) {
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 12.sp,
                 )
+            }
+            record.jumpCount?.let { jumps ->
+                Text("$jumps jumps", color = Forest, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
             }
             if (hasSets) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {

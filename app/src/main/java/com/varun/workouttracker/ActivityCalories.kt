@@ -58,8 +58,71 @@ object ActivityCalories {
         ageYears: Int? = null,
     ): Int? {
         if (weightKg <= 0.0 || durationMillis <= 0L) return null
-        val met = activities.firstOrNull { it.name == activity }?.metFor(intensity) ?: return null
+        val met = defaultMet(activity) ?: activities.firstOrNull { it.name == activity }?.metFor(intensity) ?: return null
         return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
+    }
+
+    /** Uses total jumps / active time to select the Compendium rope-jumping intensity band. */
+    fun estimateJumpRopeCalories(jumps: Int, durationMillis: Long, weightKg: Double, heightCm: Int?, ageYears: Int?): Int? {
+        if (jumps <= 0 || durationMillis <= 0L || weightKg <= 0.0) return null
+        val skipsPerMinute = jumps / (durationMillis / 60_000.0)
+        val met = when {
+            skipsPerMinute < 100.0 -> 8.3
+            skipsPerMinute < 120.0 -> 11.8
+            else -> 12.3
+        }
+        return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
+    }
+
+    /** Estimates outdoor energy from observed speed and time; pace is seconds per km. */
+    fun estimateOutdoorCalories(activity: String, speedOrPace: Double, weightKg: Double, durationMillis: Long, heightCm: Int?, ageYears: Int?): Int? {
+        if (speedOrPace <= 0.0 || weightKg <= 0.0 || durationMillis <= 0L) return null
+        val kmh = if (activity == "Cycling") 3_600.0 / speedOrPace else 3_600.0 / speedOrPace
+        val met = when (activity) {
+            "Cycling" -> when {
+                kmh < 16.0 -> 4.0
+                kmh < 19.0 -> 6.8
+                kmh < 22.5 -> 8.0
+                else -> 10.0
+            }
+            "Walking" -> when {
+                kmh < 3.2 -> 2.8
+                kmh < 4.8 -> 3.5
+                kmh < 5.6 -> 4.3
+                else -> 5.0
+            }
+            "Hiking" -> when {
+                kmh < 3.2 -> 3.8
+                kmh < 4.8 -> 5.3
+                else -> 6.0
+            }
+            "Jogging", "Running" -> when {
+                kmh < 6.4 -> 6.5
+                kmh < 8.0 -> 8.3
+                kmh < 9.7 -> 9.8
+                kmh < 11.3 -> 11.0
+                else -> 11.8
+            }
+            else -> return null
+        }
+        return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
+    }
+
+    private fun defaultMet(activity: String): Double? = when (activity) {
+        "Strength" -> 3.5
+        "Running" -> 8.3
+        "Jogging" -> 7.5
+        "Cycling" -> 6.8
+        "Walking" -> 3.5
+        "Hiking" -> 5.3
+        "Jump Rope" -> 11.8
+        "Swimming" -> 5.8
+        "Rowing" -> 7.5
+        "Elliptical" -> 5.0
+        "Yoga" -> 2.3
+        "HIIT" -> 7.0
+        "Dance" -> 5.5
+        else -> activities.firstOrNull { it.name == activity }?.moderateMet
     }
 
     /** Estimates brisk walking energy from steps, using height for approximate step length. */
@@ -79,18 +142,6 @@ object ActivityCalories {
         return estimateMetCalories(PUSHUP_VIGOROUS_MET, weightKg, durationMillis, heightCm, ageYears)
     }
 
-    /** Approximate outdoor distance calorie estimate, with distinct cost per km by activity. */
-    fun estimateDistanceCalories(activity: String, distanceMeters: Double, weightKg: Double): Int? {
-        if (distanceMeters <= 0.0 || weightKg <= 0.0) return null
-        val kcalPerKgKm = when (activity) {
-            "Cycling" -> 0.30 // moderate recreational cycling; duration/MET estimate preferred when GPS speed is unavailable
-            "Hiking" -> 0.75
-            "Walking" -> 0.50
-            else -> 1.0 // running/jogging level-ground approximation
-        }
-        return (distanceMeters / 1_000.0 * weightKg * kcalPerKgKm).toInt().coerceAtLeast(0)
-    }
-
     private fun estimateMetCalories(met: Double, weightKg: Double, durationMillis: Long, heightCm: Int?, ageYears: Int?): Int {
         val minutes = durationMillis / 60_000.0
         val height = heightCm?.takeIf { it in 80..250 }
@@ -100,7 +151,12 @@ object ActivityCalories {
             // the app does not collect sex. Use that resting-energy estimate to
             // scale the activity MET value by this person's height, age, and weight.
             val restingKcalPerDay = 10.0 * weightKg + 6.25 * height - 5.0 * age - 78.0
-            return (met * (restingKcalPerDay / 1_440.0) * minutes).toInt().coerceAtLeast(0)
+            // MET is defined relative to body mass; use the standard MET equation and
+            // apply a modest resting-rate adjustment from height/age when available.
+            val base = met * 3.5 * weightKg / 200.0 * minutes
+            val referenceRmr = 10.0 * weightKg + 6.25 * 170.0 - 5.0 * 35.0 - 78.0
+            val adjustment = (restingKcalPerDay / referenceRmr).coerceIn(0.8, 1.2)
+            return (base * adjustment).toInt().coerceAtLeast(0)
         }
         // Without height and age, fall back to the standard MET × 3.5 ml/kg/min conversion.
         return ((met * 3.5 * weightKg / 200.0) * minutes).toInt()

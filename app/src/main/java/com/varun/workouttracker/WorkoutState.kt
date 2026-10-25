@@ -25,6 +25,7 @@ data class WorkoutRecord(
     val estimatedCalories: Int? = null,
     val distanceMeters: Double? = null,
     val averagePaceSecondsPerKm: Double? = null,
+    val jumpCount: Int? = null,
 )
 
 data class WorkoutTemplate(
@@ -62,6 +63,7 @@ data class WorkoutState(
     val intervalRound: Int = 1,
     val cardioMode: String = "intervals",
     val intensity: String = "moderate",
+    val jumpCount: String = "0",
 )
 
 object WorkoutStorage {
@@ -200,6 +202,7 @@ object WorkoutStorage {
                                 estimatedCalories = if (record.has("estimatedCalories") && !record.isNull("estimatedCalories")) record.optInt("estimatedCalories") else null,
                                 distanceMeters = if (record.has("distanceMeters") && !record.isNull("distanceMeters")) record.optDouble("distanceMeters") else null,
                                 averagePaceSecondsPerKm = if (record.has("averagePaceSecondsPerKm") && !record.isNull("averagePaceSecondsPerKm")) record.optDouble("averagePaceSecondsPerKm") else null,
+                                jumpCount = if (record.has("jumpCount") && !record.isNull("jumpCount")) record.optInt("jumpCount") else null,
                             )
                         },
                         finished = root.optBoolean("finished", false),
@@ -215,6 +218,7 @@ object WorkoutStorage {
                         intervalRound = root.optInt("intervalRound", 1),
                         cardioMode = root.optString("cardioMode", "intervals"),
                         intensity = root.optString("intensity", "moderate"),
+                        jumpCount = root.optString("jumpCount", "0"),
                     )
                 }
             }
@@ -237,7 +241,8 @@ object WorkoutStorage {
                     .put("weightKg", record.weightKg)
                     .put("estimatedCalories", record.estimatedCalories)
                     .put("distanceMeters", record.distanceMeters)
-                    .put("averagePaceSecondsPerKm", record.averagePaceSecondsPerKm),
+                    .put("averagePaceSecondsPerKm", record.averagePaceSecondsPerKm)
+                    .put("jumpCount", record.jumpCount),
             )
         }
         val value = JSONObject()
@@ -262,6 +267,7 @@ object WorkoutStorage {
             .put("intervalRound", state.intervalRound)
             .put("cardioMode", state.cardioMode)
             .put("intensity", state.intensity)
+            .put("jumpCount", state.jumpCount)
             .put("sets", writeSets(state.sets))
             .put("history", records)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
