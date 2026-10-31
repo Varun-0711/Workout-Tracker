@@ -1,4 +1,4 @@
-# Workout Tracker
+# Workout Tracker (WORK IN PROGRESS)
 
 A local-first Android workout tracker. Log sets in a running session, pause and resume the session clock, and keep completed workouts in local history.
 
