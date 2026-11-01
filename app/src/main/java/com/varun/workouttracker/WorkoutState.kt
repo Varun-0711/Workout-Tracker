@@ -64,6 +64,8 @@ data class WorkoutState(
     val cardioMode: String = "intervals",
     val intensity: String = "moderate",
     val jumpCount: String = "0",
+    val targetSetCount: Int = 3,
+    val activeWorkMillis: Long = 0L,
 )
 
 object WorkoutStorage {
@@ -219,6 +221,8 @@ object WorkoutStorage {
                         cardioMode = root.optString("cardioMode", "intervals"),
                         intensity = root.optString("intensity", "moderate"),
                         jumpCount = root.optString("jumpCount", "0"),
+                        targetSetCount = root.optInt("targetSetCount", 3).coerceIn(1, 999),
+                        activeWorkMillis = root.optLong("activeWorkMillis", 0L).coerceAtLeast(0L),
                     )
                 }
             }
@@ -268,6 +272,8 @@ object WorkoutStorage {
             .put("cardioMode", state.cardioMode)
             .put("intensity", state.intensity)
             .put("jumpCount", state.jumpCount)
+            .put("targetSetCount", state.targetSetCount)
+            .put("activeWorkMillis", state.activeWorkMillis)
             .put("sets", writeSets(state.sets))
             .put("history", records)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -286,7 +292,7 @@ object WorkoutStorage {
         title = "Workout",
         history = history,
         activityType = activityType,
-        sets = emptyList(),
+        sets = if (activityType == "Jump Rope") (1..3).map { index -> WorkoutSet(index, "Jump Rope", "0", "") } else emptyList(),
         timerStarted = activityType == "Strength",
         cardioMode = if (activityType in setOf("Jump Rope", "HIIT")) "intervals" else "stopwatch",
         runtimeMinutes = if (activityType == "Jump Rope") "3" else "30",

@@ -1,5 +1,7 @@
 package com.varun.workouttracker
 
+import kotlin.math.roundToInt
+
 /** Typical MET values from the 2024 Adult Compendium of Physical Activities. */
 data class ActivityDefinition(
     val name: String,
@@ -62,16 +64,37 @@ object ActivityCalories {
         return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
     }
 
-    /** Uses total jumps / active time to select the Compendium rope-jumping intensity band. */
-    fun estimateJumpRopeCalories(jumps: Int, durationMillis: Long, weightKg: Double, heightCm: Int?, ageYears: Int?): Int? {
-        if (jumps <= 0 || durationMillis <= 0L || weightKg <= 0.0) return null
-        val skipsPerMinute = jumps / (durationMillis / 60_000.0)
+    /** Uses jump volume for the total and active time / cadence for intensity. */
+    fun estimateJumpRopeCalories(
+        jumps: Double,
+        activeWorkMillis: Long,
+        weightKg: Double,
+        paceWorkMillis: Long = activeWorkMillis,
+        paceJumps: Int = jumps.toInt(),
+    ): Int? {
+        if (activeWorkMillis <= 0L || weightKg <= 0.0) return null
+        val activeMinutes = activeWorkMillis / 60_000.0
+        // Before the user has entered a jump count, use the moderate pace band
+        // as a provisional estimate. Replace it with the measured band after entry.
+        val paceMinutes = (paceWorkMillis.takeIf { it > 0L } ?: activeWorkMillis) / 60_000.0
+        val skipsPerMinute = if (paceJumps > 0) paceJumps / paceMinutes else 100.0
         val met = when {
             skipsPerMinute < 100.0 -> 8.3
             skipsPerMinute < 120.0 -> 11.8
             else -> 12.3
         }
-        return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
+        // Compendium conversion: MET × 3.5 × kg / 200 = kcal/min.
+        val caloriesPerMinute = met * 3.5 * weightKg / 200.0
+        // When jump counts are entered, estimate total burn from jump volume at
+        // a 120-skip/min reference cadence. The caller prorates live jump volume
+        // through each active round; changing work duration alone cannot erase
+        // calories for the same completed jump count.
+        val calories = if (jumps > 0.0 && paceWorkMillis > 0L) {
+            caloriesPerMinute * (jumps / 120.0)
+        } else {
+            caloriesPerMinute * activeMinutes
+        }
+        return calories.roundToInt().coerceAtLeast(0)
     }
 
     /** Estimates outdoor energy from observed speed and time; pace is seconds per km. */

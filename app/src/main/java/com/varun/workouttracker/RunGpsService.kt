@@ -31,8 +31,7 @@ class RunGpsService : Service(), LocationListener {
         super.onCreate()
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         val prefs = preferences(this)
-        activityType = intent?.getStringExtra(EXTRA_ACTIVITY_TYPE) ?: prefs.getString(KEY_ACTIVITY_TYPE, "Running") ?: "Running"
-        prefs.edit().putString(KEY_ACTIVITY_TYPE, activityType).apply()
+        activityType = prefs.getString(KEY_ACTIVITY_TYPE, "Running") ?: "Running"
         distanceMeters = prefs.getFloat(KEY_DISTANCE_METERS, 0f).toDouble()
         lastPaceSecondsPerKm = prefs.getFloat(KEY_PACE_SECONDS_PER_KM, 0f).toDouble()
         createNotificationChannel()
@@ -48,6 +47,8 @@ class RunGpsService : Service(), LocationListener {
         }
 
         val prefs = preferences(this)
+        activityType = intent?.getStringExtra(EXTRA_ACTIVITY_TYPE) ?: prefs.getString(KEY_ACTIVITY_TYPE, "Running") ?: "Running"
+        prefs.edit().putString(KEY_ACTIVITY_TYPE, activityType).apply()
         if (prefs.getBoolean(KEY_RESET_PENDING, false)) {
             distanceMeters = 0.0
             lastPaceSecondsPerKm = 0.0

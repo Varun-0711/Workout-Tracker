@@ -9,7 +9,6 @@ import android.os.Bundle
 import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.media.AudioManager
 import android.media.ToneGenerator
 import androidx.activity.ComponentActivity
@@ -75,6 +74,9 @@ import java.util.Date
 import java.util.Calendar
 import java.util.Locale
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 private val Canvas = Color(0xFFF5F3EF)
 private val Ink = Color(0xFF292B2E)
@@ -96,6 +98,10 @@ private val StarterExercises = listOf(
 private val ActivityTypes = ActivityCalories.activities.map { it.name }
 private val GpsActivityTypes = setOf("Running", "Jogging", "Walking", "Hiking", "Cycling")
 private fun isGpsActivity(activity: String) = activity in GpsActivityTypes
+private fun hasSetTracking(activity: String) = activity == "Strength" || activity == "Jump Rope"
+private fun WorkoutState.totalJumpCount(): Int = sets
+    .filter { it.exercise == "Jump Rope" }
+    .sumOf { it.reps.toIntOrNull() ?: 0 }
 private val BodyweightExerciseNames = setOf(
     "pushup", "pullup", "chinup", "dip", "dips", "plank", "burpee", "airsquat",
     "bodyweightsquat", "jumpingjack", "mountainclimber", "situp", "situps",
@@ -106,7 +112,7 @@ private val BodyweightExerciseNames = setOf(
 private fun isBodyweightExercise(exercise: String): Boolean {
     val normalized = exercise.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
     if (normalized.startsWith("weighted")) return false
-    return normalized in BodyweightExerciseNames || "bodyweight" in normalized || normalized.startsWith("bw")
+    return normalized in BodyweightExerciseNames || normalized == "jumprope" || "bodyweight" in normalized || normalized.startsWith("bw")
 }
 
 private fun WorkoutSet.needsWeight(): Boolean = !isBodyweightExercise(exercise)
@@ -117,18 +123,23 @@ private fun List<WorkoutSet>.hasMissingRequiredWeights(): Boolean =
 private enum class AppTab { HOME, WORKOUT, HISTORY, SETTINGS }
 
 class MainActivity : ComponentActivity() {
+    private fun enableImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-                View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        enableImmersiveMode()
         setContent { WorkoutTrackerApp() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enableImmersiveMode()
     }
 }
 
@@ -183,6 +194,43 @@ private fun WorkoutTrackerApp() {
     val estimatedManualPushupCalories = bodyWeightKg?.let {
         ActivityCalories.estimatePushupCalories(manualPushupsToday, it, profileHeight.toIntOrNull(), profileAge.toIntOrNull())
     } ?: 0
+    val activeWorkoutCalories = if (
+        !workout.finished && workout.timerStarted && workout.activityType != "Choose activity" &&
+        dayStart(workout.startedAt) == dayStart(now)
+    ) bodyWeightKg?.let { weight ->
+        val duration = workout.elapsedMillis(now)
+        if (workout.activityType == "Jump Rope") {
+            val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = false)
+            ActivityCalories.estimateJumpRopeCalories(
+                estimate.jumpsForCalories,
+                estimate.activeWorkMillis,
+                weight,
+                estimate.paceWorkMillis,
+                estimate.jumpsForPace,
+            )
+        } else {
+            val distance = gpsDistanceMeters.takeIf { isGpsActivity(workout.activityType) && it > 0.0 }
+            if (distance != null) {
+                ActivityCalories.estimateOutdoorCalories(
+                    workout.activityType,
+                    duration.toDouble() / distance,
+                    weight,
+                    duration,
+                    profileHeight.toIntOrNull(),
+                    profileAge.toIntOrNull(),
+                )
+            } else {
+                ActivityCalories.estimateCalories(
+                    workout.activityType,
+                    workout.intensity,
+                    weight,
+                    duration,
+                    profileHeight.toIntOrNull(),
+                    profileAge.toIntOrNull(),
+                )
+            }
+        }
+    } ?: 0 else 0
     val startStepService = {
         ContextCompat.startForegroundService(context, Intent(context, StepCounterService::class.java).setAction(StepCounterService.ACTION_START))
     }
@@ -309,10 +357,22 @@ private fun WorkoutTrackerApp() {
                 else -> 0L
             }
             update { state ->
+                val finalJumpSet = state.activityType == "Jump Rope" && state.intervalPhase == "work" && state.intervalRound >= state.targetSetCount
+                val completedSetElapsed = if (finalJumpSet) state.elapsedMillis(now) else state.elapsedBeforePause
+                val completedWorkMillis = if (state.activityType == "Jump Rope" && state.intervalPhase == "work") {
+                    state.activeWorkMillis + (state.runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+                } else state.activeWorkMillis
                 state.copy(
-                    intervalPhase = nextPhase,
-                    intervalEndsAt = if (nextDuration > 0L) previousEnd + nextDuration else 0L,
+                    intervalPhase = if (finalJumpSet) "completed" else nextPhase,
+                    intervalEndsAt = if (nextDuration > 0L && !finalJumpSet) previousEnd + nextDuration else 0L,
                     intervalRound = if (state.intervalPhase == "rest") state.intervalRound + 1 else state.intervalRound,
+                    timerStopped = state.timerStopped || finalJumpSet,
+                    pausedAt = if (finalJumpSet) now else state.pausedAt,
+                    elapsedBeforePause = completedSetElapsed,
+                    activeWorkMillis = completedWorkMillis,
+                    sets = if (state.activityType == "Jump Rope" && state.intervalPhase == "work") {
+                        state.sets.map { set -> if (set.exercise == "Jump Rope" && set.id == state.intervalRound) set.copy(completed = true) else set }
+                    } else state.sets,
                 )
             }
             playIntervalBeep()
@@ -485,10 +545,22 @@ private fun WorkoutTrackerApp() {
                             runtimeMinutes = workout.runtimeMinutes,
                             restMinutes = workout.restMinutes,
                             prepSeconds = workout.prepSeconds,
+                            targetSetCount = workout.targetSetCount,
+                            showSetCount = workout.activityType == "Jump Rope",
                             editable = !workout.timerStarted || workout.timerStopped,
                             onRuntimeChange = { value -> update { it.copy(runtimeMinutes = value) } },
                             onRestChange = { value -> update { it.copy(restMinutes = value) } },
                             onPrepChange = { value -> update { it.copy(prepSeconds = value) } },
+                            onSetCountChange = { value ->
+                                update { state ->
+                                    val count = value.toIntOrNull()?.coerceIn(1, 999) ?: state.targetSetCount
+                                    val jumpSets = state.sets.filter { it.exercise == "Jump Rope" }
+                                    val resizedSets = (1..count).map { index ->
+                                        jumpSets.getOrNull(index - 1)?.copy(id = index) ?: WorkoutSet(index, "Jump Rope", "0", "")
+                                    }
+                                    state.copy(targetSetCount = count, sets = if (state.activityType == "Jump Rope") resizedSets else state.sets)
+                                }
+                            },
                             onModeChange = { mode ->
                                 update {
                                     it.copy(
@@ -510,18 +582,20 @@ private fun WorkoutTrackerApp() {
                     }
                     if (!requireActivityChoice && workout.activityType == "Jump Rope") item {
                         JumpCountCard(
-                            jumpCount = workout.jumpCount,
-                            editable = !workout.finished,
-                            calories = bodyWeightKg?.let {
+                            jumpCount = workout.totalJumpCount(),
+                            calorieLabel = if (workout.timerStarted) "CALORIES SO FAR" else "EST. TOTAL",
+                            hasWeight = bodyWeightKg != null,
+                            estimateReady = workout.totalJumpCount() > 0 || workout.timerStarted,
+                            calories = bodyWeightKg?.let { weight ->
+                                val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = true)
                                 ActivityCalories.estimateJumpRopeCalories(
-                                    workout.jumpCount.toIntOrNull() ?: 0,
-                                    workout.elapsedMillis(now),
-                                    it,
-                                    profileHeight.toIntOrNull(),
-                                    profileAge.toIntOrNull(),
-                                )
+                                    estimate.jumpsForCalories,
+                                    estimate.activeWorkMillis,
+                                    weight,
+                                    estimate.paceWorkMillis,
+                                    estimate.jumpsForPace,
+                                ) ?: if (workout.timerStarted) 0 else null
                             },
-                            onChange = { value -> update { it.copy(jumpCount = value) } },
                         )
                     }
                     val restSeconds = when {
@@ -549,13 +623,13 @@ private fun WorkoutTrackerApp() {
                             )
                         }
                     }
-                    if (!requireActivityChoice && workout.activityType == "Strength") item {
+                    if (!requireActivityChoice && hasSetTracking(workout.activityType)) item {
                         SectionHeading(
-                            title = "TODAY'S WORKOUT",
+                            title = if (workout.activityType == "Jump Rope") "JUMP ROPE SETS" else "TODAY'S WORKOUT",
                             trailing = "${workout.sets.count { it.completed }} / ${workout.sets.size} sets",
                         )
                     }
-                    if (!requireActivityChoice && workout.activityType == "Strength") {
+                    if (!requireActivityChoice && hasSetTracking(workout.activityType) && workout.sets.isNotEmpty()) {
                         items(workout.sets.map { it.exercise }.distinct(), key = { it }) { exercise ->
                             val exerciseSets = workout.sets.filter { it.exercise == exercise }
                             ExerciseGroupCard(
@@ -571,21 +645,40 @@ private fun WorkoutTrackerApp() {
                                             val changedState = state.replace(set.copy(completed = completing))
                                             val hasAnotherSet = changedState.sets.any { !it.completed }
                                             changedState.copy(
-                                                restUntil = if (completing && hasAnotherSet && state.restTimerSeconds > 0 && state.pausedAt == 0L) System.currentTimeMillis() + state.restTimerSeconds * 1_000L else 0L,
-                                                pausedRestRemaining = if (completing && hasAnotherSet && state.restTimerSeconds > 0 && state.pausedAt > 0L) state.restTimerSeconds * 1_000L else 0L,
+                                                restUntil = if (state.activityType == "Strength" && completing && hasAnotherSet && state.restTimerSeconds > 0 && state.pausedAt == 0L) System.currentTimeMillis() + state.restTimerSeconds * 1_000L else 0L,
+                                                pausedRestRemaining = if (state.activityType == "Strength" && completing && hasAnotherSet && state.restTimerSeconds > 0 && state.pausedAt > 0L) state.restTimerSeconds * 1_000L else 0L,
                                             )
                                         }
                                     }
                                 },
-                                onRemoveSet = { set -> update { state -> state.copy(sets = state.sets.filterNot { it.id == set.id }) } },
+                                onRemoveSet = { set -> update { state ->
+                                    val remaining = state.sets.filterNot { it.exercise == set.exercise && it.id == set.id }
+                                    if (state.activityType == "Jump Rope") {
+                                        val jumpSets = remaining.filter { it.exercise == "Jump Rope" }
+                                            .mapIndexed { index, jumpSet -> jumpSet.copy(id = index + 1) }
+                                            .ifEmpty { listOf(WorkoutSet(1, "Jump Rope", "0", "")) }
+                                        state.copy(sets = jumpSets, targetSetCount = jumpSets.size)
+                                    } else state.copy(sets = remaining)
+                                } },
                                 onAddSet = {
                                     val last = exerciseSets.lastOrNull()
-                                    val nextId = (workout.sets.maxOfOrNull { it.id } ?: 0) + 1
+                                    val nextId = (workout.sets.filter { it.exercise == exercise }.maxOfOrNull { it.id } ?: 0) + 1
                                     update { state ->
-                                        state.copy(sets = state.sets + WorkoutSet(nextId, exercise, last?.reps ?: "8", last?.weight ?: ""))
+                                        state.copy(
+                                            sets = state.sets + WorkoutSet(nextId, exercise, if (exercise == "Jump Rope") "0" else last?.reps ?: "8", last?.weight ?: ""),
+                                            targetSetCount = if (state.activityType == "Jump Rope") maxOf(state.targetSetCount, nextId) else state.targetSetCount,
+                                        )
                                     }
                                 },
-                                onRemoveExercise = { update { state -> state.copy(sets = state.sets.filterNot { it.exercise == exercise }) } },
+                                onRemoveExercise = {
+                                    update { state ->
+                                        val remaining = state.sets.filterNot { it.exercise == exercise }
+                                        if (state.activityType == "Jump Rope") {
+                                            val jumpSets = remaining.filter { it.exercise == "Jump Rope" }.mapIndexed { index, set -> set.copy(id = index + 1) }
+                                            state.copy(sets = jumpSets, targetSetCount = jumpSets.size.coerceAtLeast(1))
+                                        } else state.copy(sets = remaining)
+                                    }
+                                },
                             )
                         }
                     }
@@ -593,7 +686,9 @@ private fun WorkoutTrackerApp() {
                     if (!requireActivityChoice && !workout.finished && workout.activityType == "Strength") {
                         item {
                             Button(
-                                onClick = { showExerciseDialog = true },
+                                onClick = {
+                                    showExerciseDialog = true
+                                },
                                 modifier = Modifier.fillMaxWidth().height(50.dp),
                                 shape = RoundedCornerShape(15.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Forest),
@@ -607,7 +702,7 @@ private fun WorkoutTrackerApp() {
                             workout = workout,
                             onFinish = {
                                 val duration = workout.elapsedMillis(now)
-                                val weightForSession = WorkoutStorage.bodyWeightBefore(context, workout.startedAt)
+                                val weightForSession = WorkoutStorage.bodyWeightBefore(context, workout.startedAt) ?: bodyWeightKg
                                 val savedRunDistance = RunGpsService.preferences(context).getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()
                                 val runDistance = savedRunDistance.takeIf { isGpsActivity(workout.activityType) && it > 0.0 }
                                 val averagePace = runDistance?.let { distance -> duration.toDouble() / distance }
@@ -622,15 +717,18 @@ private fun WorkoutTrackerApp() {
                                     weightKg = weightForSession,
                                     distanceMeters = runDistance,
                                     averagePaceSecondsPerKm = averagePace,
-                                    jumpCount = if (workout.activityType == "Jump Rope") workout.jumpCount.toIntOrNull() else null,
+                                    jumpCount = if (workout.activityType == "Jump Rope") workout.totalJumpCount() else null,
                                     estimatedCalories = weightForSession?.let {
-                                        if (workout.activityType == "Jump Rope") ActivityCalories.estimateJumpRopeCalories(
-                                            workout.jumpCount.toIntOrNull() ?: 0,
-                                            duration,
-                                            it,
-                                            ProfileStorage.heightCm(context),
-                                            ProfileStorage.age(context),
-                                        ) else if (runDistance != null) ActivityCalories.estimateOutdoorCalories(
+                                        if (workout.activityType == "Jump Rope") {
+                                            val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = false)
+                                            ActivityCalories.estimateJumpRopeCalories(
+                                                estimate.jumpsForCalories,
+                                                estimate.activeWorkMillis,
+                                                it,
+                                                estimate.paceWorkMillis,
+                                                estimate.jumpsForPace,
+                                            )
+                                        } else if (runDistance != null) ActivityCalories.estimateOutdoorCalories(
                                             workout.activityType,
                                             averagePace ?: 0.0,
                                             it,
@@ -733,7 +831,7 @@ private fun WorkoutTrackerApp() {
                                 ageYears = profileAge.toIntOrNull(),
                                 history = workout.history,
                                 today = dayStart(now),
-                                additionalCalories = estimatedStepCalories + estimatedManualPushupCalories,
+                                additionalCalories = activeWorkoutCalories + estimatedStepCalories + estimatedManualPushupCalories,
                             )
                         }
                     } else {
@@ -1135,25 +1233,99 @@ private fun WorkoutState.elapsedMillis(now: Long): Long {
     return elapsedBeforePause + if (frozen) 0L else (now - resumedAt).coerceAtLeast(0L)
 }
 
-private fun WorkoutState.startActivityTimer(now: Long): WorkoutState = copy(
-    startedAt = now,
-    resumedAt = now,
-    pausedAt = 0L,
-    elapsedBeforePause = 0L,
-    timerStarted = true,
-    timerStopped = false,
-    intervalPhase = if (cardioMode == "intervals") "countdown" else "stopwatch",
-    intervalEndsAt = if (cardioMode == "intervals") now + (prepSeconds.toLongOrNull() ?: 10L).coerceIn(1L, 999L) * 1_000L else 0L,
-    pausedIntervalRemaining = 0L,
-    intervalRound = 1,
+private fun WorkoutState.jumpRopeActiveWorkMillis(now: Long): Long {
+    if (cardioMode != "intervals") return elapsedMillis(now)
+    if (!timerStarted || timerStopped || intervalPhase != "work") return activeWorkMillis
+    val workDuration = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+    val remaining = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
+    return activeWorkMillis + (workDuration - remaining).coerceIn(0L, workDuration)
+}
+
+private data class JumpRopeEstimateInputs(
+    val jumpsForCalories: Double,
+    val jumpsForPace: Int,
+    val activeWorkMillis: Long,
+    val paceWorkMillis: Long,
 )
+
+private fun WorkoutState.jumpRopeEstimateInputs(now: Long, projectWhenIdle: Boolean): JumpRopeEstimateInputs {
+    val totalJumps = totalJumpCount()
+    val roundWorkMillis = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+    if (!timerStarted) {
+        val projectedWork = if (projectWhenIdle && cardioMode == "intervals") roundWorkMillis * targetSetCount else 0L
+        val enteredRoundCount = sets.count { it.exercise == "Jump Rope" && (it.reps.toIntOrNull() ?: 0) > 0 }
+        val paceWork = if (projectedWork > 0L) roundWorkMillis * enteredRoundCount else 0L
+        return JumpRopeEstimateInputs(totalJumps.toDouble(), totalJumps, projectedWork, paceWork)
+    }
+
+    val elapsedWork = jumpRopeActiveWorkMillis(now)
+    if (cardioMode != "intervals") return JumpRopeEstimateInputs(0.0, totalJumps, elapsedWork, 0L)
+
+    // Count only rounds reached by the interval timer, so jump counts entered
+    // for future rounds do not inflate the live pace or calorie estimate.
+    val reachedRound = when {
+        intervalPhase == "countdown" -> 0
+        intervalPhase == "completed" -> targetSetCount
+        else -> intervalRound
+    }
+    val reachedJumpsForPace = sets
+        .filter { it.exercise == "Jump Rope" && it.id <= reachedRound }
+        .sumOf { it.reps.toIntOrNull() ?: 0 }
+    val completedRounds = (elapsedWork / roundWorkMillis).toInt().coerceIn(0, reachedRound)
+    val partialRound = if (completedRounds < reachedRound) {
+        (elapsedWork - completedRounds * roundWorkMillis).coerceIn(0L, roundWorkMillis).toDouble() / roundWorkMillis
+    } else 0.0
+    val completedJumps = sets
+        .filter { it.exercise == "Jump Rope" && it.id <= completedRounds }
+        .sumOf { it.reps.toIntOrNull() ?: 0 }
+        .toDouble()
+    val partialJumps = sets
+        .firstOrNull { it.exercise == "Jump Rope" && it.id == completedRounds + 1 }
+        ?.reps?.toIntOrNull()?.toDouble()?.times(partialRound) ?: 0.0
+    return JumpRopeEstimateInputs(
+        jumpsForCalories = completedJumps + partialJumps,
+        jumpsForPace = reachedJumpsForPace,
+        activeWorkMillis = elapsedWork,
+        paceWorkMillis = roundWorkMillis * reachedRound,
+    )
+}
+
+private fun WorkoutState.startActivityTimer(now: Long): WorkoutState {
+    val jumpSets = if (activityType == "Jump Rope" && cardioMode == "intervals") {
+        val existing = sets.filter { it.exercise == "Jump Rope" }
+        (1..targetSetCount).map { index ->
+            existing.getOrNull(index - 1)?.copy(id = index, completed = false)
+                ?: WorkoutSet(index, "Jump Rope", "0", "")
+        }
+    } else sets
+    return copy(
+        startedAt = now,
+        resumedAt = now,
+        pausedAt = 0L,
+        elapsedBeforePause = 0L,
+        activeWorkMillis = 0L,
+        timerStarted = true,
+        timerStopped = false,
+        intervalPhase = if (cardioMode == "intervals") "countdown" else "stopwatch",
+        intervalEndsAt = if (cardioMode == "intervals") now + (prepSeconds.toLongOrNull() ?: 10L).coerceIn(1L, 999L) * 1_000L else 0L,
+        pausedIntervalRemaining = 0L,
+        intervalRound = 1,
+        sets = jumpSets,
+    )
+}
 
 private fun WorkoutState.stopActivityTimer(now: Long): WorkoutState {
     if (!timerStarted || timerStopped || finished) return this
+    val workDuration = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+    val remainingWork = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
+    val activeWork = if (activityType == "Jump Rope" && cardioMode == "intervals" && intervalPhase == "work") {
+        activeWorkMillis + (workDuration - remainingWork).coerceIn(0L, workDuration)
+    } else activeWorkMillis
     return copy(
         elapsedBeforePause = elapsedMillis(now),
         pausedAt = now,
         timerStopped = true,
+        activeWorkMillis = activeWork,
         intervalPhase = "stopped",
         intervalEndsAt = 0L,
         pausedIntervalRemaining = 0L,
@@ -1400,6 +1572,7 @@ private fun WorkoutStartCard(
                 "countdown" -> "GET READY"
                 "work" -> "WORK · ROUND ${workout.intervalRound}"
                 "rest" -> "REST · ROUND ${workout.intervalRound}"
+                "completed" -> "ALL SETS COMPLETE"
                 "stopped" -> "TIMER STOPPED"
                 else -> "READY TO START"
             }
@@ -1467,7 +1640,7 @@ private fun WorkoutStartCard(
                     Text(formatClock(primaryTime), color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         if (workout.cardioMode == "intervals") {
-                            "Elapsed ${formatClock(workout.elapsedMillis(now))}  ·  Round ${workout.intervalRound}"
+                            "Elapsed ${formatClock(workout.elapsedMillis(now))}  ·  Round ${workout.intervalRound} / ${workout.targetSetCount}"
                         } else {
                             "Continuous run · no rest intervals"
                         },
@@ -1555,10 +1728,13 @@ private fun CardioTimerSettings(
     runtimeMinutes: String,
     restMinutes: String,
     prepSeconds: String,
+    targetSetCount: Int,
+    showSetCount: Boolean,
     editable: Boolean,
     onRuntimeChange: (String) -> Unit,
     onRestChange: (String) -> Unit,
     onPrepChange: (String) -> Unit,
+    onSetCountChange: (String) -> Unit,
     onModeChange: (String) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
@@ -1600,9 +1776,24 @@ private fun CardioTimerSettings(
                     modifier = Modifier.weight(1f),
                     onAdjust = { delta -> onPrepChange(((prepSeconds.toIntOrNull() ?: 10) + delta).coerceIn(1, 999).toString()) },
                 )
-                Spacer(Modifier.weight(1f))
+                if (showSetCount) {
+                    NumberField(
+                        label = "SETS",
+                        value = targetSetCount.toString(),
+                        editable = editable,
+                        onValueChange = onSetCountChange,
+                        suffix = "sets",
+                        modifier = Modifier.weight(1f),
+                        onAdjust = { delta -> onSetCountChange((targetSetCount + delta).coerceIn(1, 999).toString()) },
+                    )
+                } else Spacer(Modifier.weight(1f))
                 }
-                Text("Starts with a setup countdown, then repeats work and rest until you stop.", color = Muted, fontSize = 10.sp)
+                Text(
+                    if (showSetCount) "Setup countdown, then one work interval per set with rest between sets. No rest after the last set."
+                    else "Starts with a setup countdown, then repeats work and rest until you stop.",
+                    color = Muted,
+                    fontSize = 10.sp,
+                )
             } else {
                 Text("Counts up continuously. No rest timer or automatic breaks.", color = Muted, fontSize = 11.sp)
             }
@@ -1612,30 +1803,40 @@ private fun CardioTimerSettings(
 
 @Composable
 private fun JumpCountCard(
-    jumpCount: String,
-    editable: Boolean,
+    jumpCount: Int,
+    calorieLabel: String,
+    hasWeight: Boolean,
+    estimateReady: Boolean,
     calories: Int?,
-    onChange: (String) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("JUMP ROPE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            Text("SESSION TOTAL", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                NumberField(
-                    label = "TOTAL JUMPS",
-                    value = jumpCount,
-                    editable = editable,
-                    onValueChange = onChange,
-                    suffix = "jumps",
-                    modifier = Modifier.weight(1f),
-                    onAdjust = { delta -> onChange(((jumpCount.toIntOrNull() ?: 0) + delta * 10).coerceAtLeast(0).toString()) },
-                )
+                Column(Modifier.weight(1f)) {
+                    Text("JUMPS", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(jumpCount.toString(), color = Ink, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("EST. CALORIES", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                    Text(calories?.let { "~$it kcal" } ?: "— kcal", color = Forest, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(calorieLabel, color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        when {
+                            !hasWeight -> "Set weight"
+                            !estimateReady -> "Enter jumps"
+                            else -> calories?.let { "~$it kcal" } ?: "— kcal"
+                        },
+                        color = Forest,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
             }
-            Text("Jump count and session time estimate your skipping rate and calorie burn.", color = Muted, fontSize = 10.sp)
+            Text(
+                if (hasWeight) "With jump counts entered, calories estimate the logged jump volume and pace; the timer scales calories during each round. Without counts, calories use active time. Rest is excluded."
+                else "Add your body weight in Settings to estimate calories. Jump counts and timer tracking still work without it.",
+                color = Muted,
+                fontSize = 10.sp,
+            )
         }
     }
 }
@@ -1676,8 +1877,10 @@ private fun ExerciseGroupCard(
                     Text(exercise, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("${sets.count { it.completed }} / ${sets.size} sets complete", color = Muted, fontSize = 10.sp)
                 }
-                TextButton(onClick = onRemoveExercise, enabled = editable, contentPadding = PaddingValues(horizontal = 6.dp)) {
-                    Text("Remove", color = Muted, fontSize = 11.sp)
+                if (exercise != "Jump Rope") {
+                    TextButton(onClick = onRemoveExercise, enabled = editable, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                        Text("Remove", color = Muted, fontSize = 11.sp)
+                    }
                 }
             }
             sets.forEachIndexed { index, set ->
@@ -1690,26 +1893,29 @@ private fun ExerciseGroupCard(
                         Text((index + 1).toString(), color = if (set.completed) Forest else Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                     NumberField(
-                        label = "REPS",
+                        label = if (exercise == "Jump Rope") "JUMPS" else "REPS",
                         value = set.reps,
                         editable = editable,
                         onValueChange = { onRepsChange(set, it) },
                         modifier = Modifier.weight(1f),
+                        maxDigits = if (exercise == "Jump Rope") 5 else 3,
                         onAdjust = { delta -> onRepsChange(set, ((set.reps.toIntOrNull() ?: 0) + delta).coerceAtLeast(0).toString()) },
                     )
-                    NumberField(
-                        label = if (set.needsWeight()) "WEIGHT *" else "WEIGHT OPTIONAL",
-                        value = set.weight,
-                        editable = editable,
-                        onValueChange = { onWeightChange(set, it) },
-                        suffix = "kg",
-                        modifier = Modifier.weight(1f),
-                        allowDecimal = true,
-                        onAdjust = { delta ->
-                            val adjusted = ((set.weight.toDoubleOrNull() ?: 0.0) + delta * 2.5).coerceAtLeast(0.0)
-                            onWeightChange(set, if (adjusted % 1.0 == 0.0) adjusted.toInt().toString() else "%.1f".format(Locale.US, adjusted))
-                        },
-                    )
+                    if (exercise != "Jump Rope") {
+                        NumberField(
+                            label = if (set.needsWeight()) "WEIGHT *" else "WEIGHT OPTIONAL",
+                            value = set.weight,
+                            editable = editable,
+                            onValueChange = { onWeightChange(set, it) },
+                            suffix = "kg",
+                            modifier = Modifier.weight(1f),
+                            allowDecimal = true,
+                            onAdjust = { delta ->
+                                val adjusted = ((set.weight.toDoubleOrNull() ?: 0.0) + delta * 2.5).coerceAtLeast(0.0)
+                                onWeightChange(set, if (adjusted % 1.0 == 0.0) adjusted.toInt().toString() else "%.1f".format(Locale.US, adjusted))
+                            },
+                        )
+                    }
                     Button(
                         onClick = { onComplete(set) },
                         enabled = editable && (!set.needsWeight() || set.weight.toDoubleOrNull() != null),
@@ -1742,6 +1948,7 @@ private fun NumberField(
     modifier: Modifier = Modifier,
     suffix: String? = null,
     allowDecimal: Boolean = false,
+    maxDigits: Int = 3,
     onAdjust: (Int) -> Unit,
 ) {
     Column(modifier) {
@@ -1751,7 +1958,7 @@ private fun NumberField(
             OutlinedTextField(
                 value = value,
                 onValueChange = { text ->
-                    val valid = if (allowDecimal) text.matches(Regex("^\\d{0,3}(\\.\\d{0,2})?$")) else text.matches(Regex("^\\d{0,3}$"))
+                    val valid = if (allowDecimal) text.matches(Regex("^\\d{0,$maxDigits}(\\.\\d{0,2})?$")) else text.matches(Regex("^\\d{0,$maxDigits}$"))
                     if (valid) onValueChange(text)
                 },
                 modifier = Modifier.weight(1f).height(55.dp),
@@ -1843,6 +2050,7 @@ private fun RestTimerSettings(seconds: Int, editable: Boolean, onChange: (Int) -
 private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
     val completed = workout.sets.count { it.completed }
     val strength = workout.activityType == "Strength"
+    val setTracked = hasSetTracking(workout.activityType)
     val missingWeights = strength && workout.sets.hasMissingRequiredWeights()
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Row(
@@ -1854,7 +2062,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
             Text(
                 when {
                     workout.finished -> "Workout saved to your history."
-                    strength -> "Steady progress. Every set counts."
+                    setTracked -> "Steady progress. Every set counts."
                     else -> "Time is tracked as you move. Pause whenever you need."
                 },
                 color = Forest,
@@ -1865,16 +2073,16 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
         if (!workout.finished) {
             Button(
                 onClick = onFinish,
-                enabled = !strength || (completed > 0 && !missingWeights),
+                enabled = !setTracked || (completed > 0 && !missingWeights),
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Forest),
             ) {
                 Text(
                     when {
-                        !strength -> "Finish ${workout.activityType.lowercase(Locale.getDefault())}"
+                        !setTracked -> "Finish ${workout.activityType.lowercase(Locale.getDefault())}"
                         missingWeights -> "Enter weights for weighted exercises"
-                        completed > 0 -> "Finish workout  ·  $completed / ${workout.sets.size} sets done"
+                        completed > 0 -> "Finish ${if (strength) "workout" else "jump rope"} · $completed / ${workout.sets.size} sets done"
                         else -> "Complete a set to finish"
                     },
                     fontWeight = FontWeight.SemiBold,
@@ -2083,7 +2291,7 @@ private fun BodyWeightAndCaloriesCard(
                 else -> "Estimate uses your saved weight, height, and age with activity MET values."
             }
             Text(estimateBasis, color = Muted, fontSize = 12.sp)
-            Text("Today's total adds finished workouts, step-based walking, and quick-logged push-ups. Step estimates assume a height-based step length and brisk walking; push-ups assume 30 reps/min. Estimates are approximate and may overlap a separately logged walking workout.", color = Muted, fontSize = 10.sp)
+            Text("Today's total includes a live estimate for an active workout, finished workouts, step-based walking, and quick-logged push-ups. Step and push-up estimates are approximate and may overlap a separately logged walking workout.", color = Muted, fontSize = 10.sp)
         }
     }
 }
@@ -2262,7 +2470,7 @@ private fun EmptyHistoryCard() {
 
 @Composable
 private fun HistoryCard(record: WorkoutRecord) {
-    val hasSets = record.activityType == "Strength"
+    val hasSets = hasSetTracking(record.activityType)
     val completedSets = record.sets.filter { it.completed }
     val volume = completedSets.sumOf { set ->
         val reps = set.reps.toDoubleOrNull() ?: 0.0
@@ -2310,7 +2518,7 @@ private fun HistoryCard(record: WorkoutRecord) {
             }
             record.sets.forEach { set ->
                 Text(
-                    "${if (set.completed) "✓" else "·"}  ${set.exercise}  ·  ${set.reps} reps${set.weight.takeIf { it.isNotBlank() }?.let { " × $it kg" } ?: ""}",
+                    "${if (set.completed) "✓" else "·"}  ${set.exercise}  ·  ${set.reps} ${if (set.exercise == "Jump Rope") "jumps" else "reps"}${set.weight.takeIf { it.isNotBlank() }?.let { " × $it kg" } ?: ""}",
                     color = Muted,
                     fontSize = 12.sp,
                 )
