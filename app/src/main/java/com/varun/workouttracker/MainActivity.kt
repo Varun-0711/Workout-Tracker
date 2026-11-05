@@ -913,7 +913,7 @@ private fun WorkoutTrackerApp() {
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Column(Modifier.fillMaxWidth()) {
-                                    Text("${activityEmoji(type)}  $type", color = Forest, fontWeight = FontWeight.SemiBold)
+                                    Text(type, color = Forest, fontWeight = FontWeight.SemiBold)
                                     if (type == "Strength") Text("Rep and weight tracking", color = Muted, fontSize = 10.sp)
                                 }
                             }
@@ -2297,30 +2297,6 @@ private fun BodyWeightAndCaloriesCard(
 }
 
 @Composable
-private fun activityEmoji(activity: String): String = when (activity) {
-    "Strength" -> "🏋"
-    "Running", "Jogging" -> "🏃"
-    "Cycling" -> "🚴"
-    "Swimming" -> "🏊"
-    "Walking", "Hiking" -> "🚶"
-    "Yoga" -> "🧘"
-    "Basketball" -> "🏀"
-    "Soccer" -> "⚽"
-    "Tennis", "Badminton" -> "🏸"
-    "Boxing" -> "🥊"
-    "Volleyball" -> "🏐"
-    "Table Tennis" -> "🏓"
-    "Pilates" -> "🧘"
-    "Cricket" -> "🏏"
-    "Squash", "Racquetball" -> "🎾"
-    "Martial Arts", "Kickboxing" -> "🥋"
-    "Tai Chi" -> "🧘"
-    "Dance" -> "💃"
-    "Rowing" -> "🚣"
-    "Jump Rope", "HIIT", "Elliptical", "Stair Climbing" -> "⏱"
-    else -> "🏃"
-}
-
 private fun dayStart(time: Long): Long = Calendar.getInstance().apply {
     timeInMillis = time
     set(Calendar.HOUR_OF_DAY, 0)
