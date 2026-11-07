@@ -77,6 +77,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 private val Canvas = Color(0xFFF5F3EF)
 private val Ink = Color(0xFF292B2E)
@@ -146,6 +149,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun WorkoutTrackerApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var workout by remember { mutableStateOf(WorkoutStorage.load(context)) }
     var bodyWeightKg by remember { mutableStateOf(WorkoutStorage.loadBodyWeightKg(context)) }
     var stepCount by remember { mutableLongStateOf(StepCounterService.stepPreferences(context).getLong(StepCounterService.KEY_STEPS, 0L)) }
@@ -286,6 +290,20 @@ private fun WorkoutTrackerApp() {
         }
         prefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    DisposableEffect(context, lifecycleOwner) {
+        val prefs = StepCounterService.stepPreferences(context)
+        fun refreshStepState() {
+            stepCount = prefs.getLong(StepCounterService.KEY_STEPS, 0L)
+            stepTracking = prefs.getBoolean(StepCounterService.KEY_TRACKING, false)
+            stepStatus = prefs.getString(StepCounterService.KEY_STATUS, "idle") ?: "idle"
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refreshStepState()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        refreshStepState()
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     DisposableEffect(context) {
         val prefs = RunGpsService.preferences(context)

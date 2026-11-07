@@ -24,6 +24,7 @@ import java.util.Locale
 /** Keeps the phone's hardware step counter registered while the app is in the background. */
 class StepCounterService : Service(), SensorEventListener {
     private var stepSensor: Sensor? = null
+    private var usesStepDetector = false
     private var sensorManager: SensorManager? = null
     private var lastSensorTotal = -1L
     private var stepsToday = 0L
@@ -34,6 +35,10 @@ class StepCounterService : Service(), SensorEventListener {
         createNotificationChannel()
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+        if (stepSensor == null) {
+            stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+            usesStepDetector = stepSensor != null
+        }
         val prefs = stepPreferences(this)
         val today = todayKey()
         if (prefs.getString(KEY_DATE, null) != today) {
@@ -48,7 +53,7 @@ class StepCounterService : Service(), SensorEventListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).apply()
+            stepPreferences(this).edit().putBoolean(KEY_TRACKING, false).putString(KEY_STATUS, "paused").apply()
             sensorManager?.unregisterListener(this)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -93,30 +98,39 @@ class StepCounterService : Service(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        val rawTotal = event?.values?.firstOrNull()?.toLong() ?: return
+        val rawValue = event?.values?.firstOrNull() ?: return
         val prefs = stepPreferences(this)
         val today = todayKey()
-        if (prefs.getString(KEY_DATE, null) != today) {
-            stepsToday = 0L
-            // Sensor total is cumulative since reboot; retaining its baseline avoids losing
-            // steps taken after midnight when the service was not active at that moment.
-            if (lastSensorTotal < 0L || rawTotal < lastSensorTotal) lastSensorTotal = rawTotal
-        } else if (lastSensorTotal < 0L) {
-            lastSensorTotal = rawTotal
-        } else if (rawTotal >= lastSensorTotal) {
-            stepsToday += rawTotal - lastSensorTotal
-            lastSensorTotal = rawTotal
+        if (usesStepDetector) {
+            if (prefs.getString(KEY_DATE, null) != today) {
+                stepsToday = 0L
+                prefs.edit().putString(KEY_DATE, today).apply()
+            }
+            stepsToday += rawValue.toLong().coerceAtLeast(1L)
         } else {
-            // The hardware total resets after a device reboot. Keep today's saved steps and
-            // establish a new baseline so the reset is not interpreted as negative steps.
-            lastSensorTotal = rawTotal
+            val rawTotal = rawValue.toLong()
+            if (prefs.getString(KEY_DATE, null) != today) {
+                stepsToday = 0L
+                // Sensor total is cumulative since reboot; retaining its baseline avoids losing
+                // steps taken after midnight when the service was not active at that moment.
+                if (lastSensorTotal < 0L || rawTotal < lastSensorTotal) lastSensorTotal = rawTotal
+            } else if (lastSensorTotal < 0L) {
+                lastSensorTotal = rawTotal
+            } else if (rawTotal >= lastSensorTotal) {
+                stepsToday += rawTotal - lastSensorTotal
+                lastSensorTotal = rawTotal
+            } else {
+                // The hardware total resets after a device reboot. Keep today's saved steps and
+                // establish a new baseline so the reset is not interpreted as negative steps.
+                lastSensorTotal = rawTotal
+            }
         }
-        prefs.edit()
+        val update = prefs.edit()
             .putString(KEY_DATE, today)
             .putLong(KEY_STEPS, stepsToday)
-            .putLong(KEY_RAW_TOTAL, lastSensorTotal)
             .putString(KEY_STATUS, "active")
-            .apply()
+        if (!usesStepDetector) update.putLong(KEY_RAW_TOTAL, lastSensorTotal)
+        update.apply()
         getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification())
     }
 
@@ -175,7 +189,9 @@ class StepCounterService : Service(), SensorEventListener {
         fun todayKey(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
         fun isSupported(context: Context): Boolean =
-            (context.getSystemService(Context.SENSOR_SERVICE) as SensorManager)
-                .getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null
+            (context.getSystemService(Context.SENSOR_SERVICE) as SensorManager).let { manager ->
+                manager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null ||
+                    manager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR) != null
+            }
     }
 }
