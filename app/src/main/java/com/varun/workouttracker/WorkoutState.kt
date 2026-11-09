@@ -11,6 +11,7 @@ data class WorkoutSet(
     val reps: String,
     val weight: String,
     val completed: Boolean = false,
+    val durationMillis: Long = 0L,
 )
 
 data class WorkoutRecord(
@@ -26,6 +27,7 @@ data class WorkoutRecord(
     val distanceMeters: Double? = null,
     val averagePaceSecondsPerKm: Double? = null,
     val jumpCount: Int? = null,
+    val heightCm: Int? = null,
 )
 
 data class WorkoutTemplate(
@@ -205,6 +207,7 @@ object WorkoutStorage {
                                 distanceMeters = if (record.has("distanceMeters") && !record.isNull("distanceMeters")) record.optDouble("distanceMeters") else null,
                                 averagePaceSecondsPerKm = if (record.has("averagePaceSecondsPerKm") && !record.isNull("averagePaceSecondsPerKm")) record.optDouble("averagePaceSecondsPerKm") else null,
                                 jumpCount = if (record.has("jumpCount") && !record.isNull("jumpCount")) record.optInt("jumpCount") else null,
+                                heightCm = if (record.has("heightCm") && !record.isNull("heightCm")) record.optInt("heightCm") else null,
                             )
                         },
                         finished = root.optBoolean("finished", false),
@@ -246,7 +249,8 @@ object WorkoutStorage {
                     .put("estimatedCalories", record.estimatedCalories)
                     .put("distanceMeters", record.distanceMeters)
                     .put("averagePaceSecondsPerKm", record.averagePaceSecondsPerKm)
-                    .put("jumpCount", record.jumpCount),
+                    .put("jumpCount", record.jumpCount)
+                    .put("heightCm", record.heightCm),
             )
         }
         val value = JSONObject()
@@ -307,7 +311,8 @@ object WorkoutStorage {
                     .put("exercise", set.exercise)
                     .put("reps", set.reps)
                     .put("weight", set.weight)
-                    .put("completed", set.completed),
+                    .put("completed", set.completed)
+                    .put("durationMillis", set.durationMillis.coerceAtLeast(0L)),
             )
         }
     }
@@ -320,6 +325,7 @@ object WorkoutStorage {
             reps = row.getString("reps"),
             weight = row.optString("weight", ""),
             completed = row.optBoolean("completed", false),
+            durationMillis = row.optLong("durationMillis", 0L).coerceAtLeast(0L),
         )
     }
 }

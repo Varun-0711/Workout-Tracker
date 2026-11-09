@@ -152,6 +152,7 @@ private fun WorkoutTrackerApp() {
     val lifecycleOwner = LocalLifecycleOwner.current
     var workout by remember { mutableStateOf(WorkoutStorage.load(context)) }
     var bodyWeightKg by remember { mutableStateOf(WorkoutStorage.loadBodyWeightKg(context)) }
+    val workoutWeightKg = WorkoutStorage.bodyWeightBefore(context, workout.startedAt) ?: bodyWeightKg
     var stepCount by remember { mutableLongStateOf(StepCounterService.stepPreferences(context).getLong(StepCounterService.KEY_STEPS, 0L)) }
     var stepTracking by remember { mutableStateOf(StepCounterService.stepPreferences(context).getBoolean(StepCounterService.KEY_TRACKING, false)) }
     var stepStatus by remember { mutableStateOf(StepCounterService.stepPreferences(context).getString(StepCounterService.KEY_STATUS, "idle") ?: "idle") }
@@ -201,16 +202,14 @@ private fun WorkoutTrackerApp() {
     val activeWorkoutCalories = if (
         !workout.finished && workout.timerStarted && workout.activityType != "Choose activity" &&
         dayStart(workout.startedAt) == dayStart(now)
-    ) bodyWeightKg?.let { weight ->
-        val duration = workout.elapsedMillis(now)
+    ) workoutWeightKg?.let { weight ->
+        val duration = if (workout.cardioMode == "intervals") workout.intervalWorkMillis(now) else workout.elapsedMillis(now)
         if (workout.activityType == "Jump Rope") {
-            val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = false)
-            ActivityCalories.estimateJumpRopeCalories(
-                estimate.jumpsForCalories,
-                estimate.activeWorkMillis,
+            ActivityCalories.estimateJumpRopeSetCalories(
+                workout.jumpRopeEfforts(now, projectWhenIdle = false),
                 weight,
-                estimate.paceWorkMillis,
-                estimate.jumpsForPace,
+                profileHeight.toIntOrNull(),
+                profileAge.toIntOrNull(),
             )
         } else {
             val distance = gpsDistanceMeters.takeIf { isGpsActivity(workout.activityType) && it > 0.0 }
@@ -377,8 +376,9 @@ private fun WorkoutTrackerApp() {
             update { state ->
                 val finalJumpSet = state.activityType == "Jump Rope" && state.intervalPhase == "work" && state.intervalRound >= state.targetSetCount
                 val completedSetElapsed = if (finalJumpSet) state.elapsedMillis(now) else state.elapsedBeforePause
-                val completedWorkMillis = if (state.activityType == "Jump Rope" && state.intervalPhase == "work") {
-                    state.activeWorkMillis + (state.runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+                val roundWorkMillis = (state.runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+                val completedWorkMillis = if (state.cardioMode == "intervals" && state.intervalPhase == "work") {
+                    state.activeWorkMillis + roundWorkMillis
                 } else state.activeWorkMillis
                 state.copy(
                     intervalPhase = if (finalJumpSet) "completed" else nextPhase,
@@ -389,7 +389,11 @@ private fun WorkoutTrackerApp() {
                     elapsedBeforePause = completedSetElapsed,
                     activeWorkMillis = completedWorkMillis,
                     sets = if (state.activityType == "Jump Rope" && state.intervalPhase == "work") {
-                        state.sets.map { set -> if (set.exercise == "Jump Rope" && set.id == state.intervalRound) set.copy(completed = true) else set }
+                        state.sets.map { set ->
+                            if (set.exercise == "Jump Rope" && set.id == state.intervalRound) {
+                                set.copy(completed = true, durationMillis = roundWorkMillis)
+                            } else set
+                        }
                     } else state.sets,
                 )
             }
@@ -585,6 +589,7 @@ private fun WorkoutTrackerApp() {
                                         cardioMode = mode,
                                         timerStarted = false,
                                         timerStopped = false,
+                                        activeWorkMillis = 0L,
                                         pausedAt = 0L,
                                         elapsedBeforePause = 0L,
                                         intervalPhase = "idle",
@@ -599,22 +604,36 @@ private fun WorkoutTrackerApp() {
                         )
                     }
                     if (!requireActivityChoice && workout.activityType == "Jump Rope") item {
+                        val caloriesWhenFinished = workout.history.lastOrNull { it.startedAt == workout.startedAt }?.estimatedCalories
                         JumpCountCard(
-                            jumpCount = workout.totalJumpCount(),
-                            calorieLabel = if (workout.timerStarted) "CALORIES SO FAR" else "EST. TOTAL",
-                            hasWeight = bodyWeightKg != null,
-                            estimateReady = workout.totalJumpCount() > 0 || workout.timerStarted,
-                            calories = bodyWeightKg?.let { weight ->
-                                val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = true)
-                                ActivityCalories.estimateJumpRopeCalories(
-                                    estimate.jumpsForCalories,
-                                    estimate.activeWorkMillis,
+                            jumpCount = if (workout.finished) workout.history.lastOrNull { it.startedAt == workout.startedAt }?.jumpCount ?: 0
+                                else workout.jumpRopeEfforts(now, projectWhenIdle = true).sumOf { it.jumps },
+                            calorieLabel = when {
+                                workout.finished -> "FINAL CALORIES"
+                                workout.timerStarted -> "CALORIES SO FAR"
+                                else -> "EST. TOTAL"
+                            },
+                            hasWeight = workoutWeightKg != null,
+                            estimateReady = workout.totalJumpCount() > 0 || workout.timerStarted || workout.finished,
+                            calories = if (workout.finished) caloriesWhenFinished else workoutWeightKg?.let { weight ->
+                                ActivityCalories.estimateJumpRopeSetCalories(
+                                    workout.jumpRopeEfforts(now, projectWhenIdle = true),
                                     weight,
-                                    estimate.paceWorkMillis,
-                                    estimate.jumpsForPace,
-                                ) ?: if (workout.timerStarted) 0 else null
+                                    profileHeight.toIntOrNull(),
+                                    profileAge.toIntOrNull(),
+                                )
                             },
                         )
+                    }
+                    if (!requireActivityChoice && workout.finished && workout.activityType != "Jump Rope") item {
+                        val finalRecord = workout.history.lastOrNull { it.startedAt == workout.startedAt }
+                        Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Text("FINAL CALORIES", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+                                Text(finalRecord?.estimatedCalories?.let { "~$it kcal" } ?: "Add body weight to estimate", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                Text("Estimate uses your saved weight, height, and age when available. Interval rest is excluded.", color = Muted, fontSize = 11.sp)
+                            }
+                        }
                     }
                     val restSeconds = when {
                         workout.pausedAt > 0L -> (workout.pausedRestRemaining / 1_000).toInt()
@@ -720,7 +739,9 @@ private fun WorkoutTrackerApp() {
                             workout = workout,
                             onFinish = {
                                 val duration = workout.elapsedMillis(now)
+                                val calorieDuration = if (workout.cardioMode == "intervals") workout.intervalWorkMillis(now) else duration
                                 val weightForSession = WorkoutStorage.bodyWeightBefore(context, workout.startedAt) ?: bodyWeightKg
+                                val recordSets = if (workout.activityType == "Jump Rope") workout.jumpRopeSetsAtFinish(now) else workout.sets
                                 val savedRunDistance = RunGpsService.preferences(context).getFloat(RunGpsService.KEY_DISTANCE_METERS, 0f).toDouble()
                                 val runDistance = savedRunDistance.takeIf { isGpsActivity(workout.activityType) && it > 0.0 }
                                 val averagePace = runDistance?.let { distance -> duration.toDouble() / distance }
@@ -729,22 +750,23 @@ private fun WorkoutTrackerApp() {
                                     startedAt = workout.startedAt,
                                     endedAt = now,
                                     elapsedMillis = duration,
-                                    sets = workout.sets,
+                                    sets = recordSets,
                                     activityType = workout.activityType,
                                     intensity = workout.intensity,
                                     weightKg = weightForSession,
                                     distanceMeters = runDistance,
                                     averagePaceSecondsPerKm = averagePace,
-                                    jumpCount = if (workout.activityType == "Jump Rope") workout.totalJumpCount() else null,
+                                    jumpCount = if (workout.activityType == "Jump Rope") recordSets.sumOf { it.reps.toIntOrNull() ?: 0 } else null,
+                                    heightCm = ProfileStorage.heightCm(context),
                                     estimatedCalories = weightForSession?.let {
                                         if (workout.activityType == "Jump Rope") {
-                                            val estimate = workout.jumpRopeEstimateInputs(now, projectWhenIdle = false)
-                                            ActivityCalories.estimateJumpRopeCalories(
-                                                estimate.jumpsForCalories,
-                                                estimate.activeWorkMillis,
+                                            ActivityCalories.estimateJumpRopeSetCalories(
+                                                recordSets.filter { set -> set.exercise == "Jump Rope" }.map { set ->
+                                                    JumpRopeSetEffort(set.reps.toIntOrNull() ?: 0, set.durationMillis)
+                                                },
                                                 it,
-                                                estimate.paceWorkMillis,
-                                                estimate.jumpsForPace,
+                                                ProfileStorage.heightCm(context),
+                                                ProfileStorage.age(context),
                                             )
                                         } else if (runDistance != null) ActivityCalories.estimateOutdoorCalories(
                                             workout.activityType,
@@ -758,7 +780,7 @@ private fun WorkoutTrackerApp() {
                                                 workout.activityType,
                                                 workout.intensity,
                                                 it,
-                                                duration,
+                                                calorieDuration,
                                                 heightCm = ProfileStorage.heightCm(context),
                                                 ageYears = ProfileStorage.age(context),
                                             )
@@ -1251,68 +1273,94 @@ private fun WorkoutState.elapsedMillis(now: Long): Long {
     return elapsedBeforePause + if (frozen) 0L else (now - resumedAt).coerceAtLeast(0L)
 }
 
-private fun WorkoutState.jumpRopeActiveWorkMillis(now: Long): Long {
-    if (cardioMode != "intervals") return elapsedMillis(now)
-    if (!timerStarted || timerStopped || intervalPhase != "work") return activeWorkMillis
-    val workDuration = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+private fun WorkoutState.intervalWorkMillis(now: Long): Long {
+    if (cardioMode != "intervals" || !timerStarted) return 0L
+    if (timerStopped || intervalPhase != "work") return activeWorkMillis
+    val roundWorkMillis = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
     val remaining = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
-    return activeWorkMillis + (workDuration - remaining).coerceIn(0L, workDuration)
+    return activeWorkMillis + (roundWorkMillis - remaining).coerceIn(0L, roundWorkMillis)
 }
 
-private data class JumpRopeEstimateInputs(
-    val jumpsForCalories: Double,
-    val jumpsForPace: Int,
-    val activeWorkMillis: Long,
-    val paceWorkMillis: Long,
-)
-
-private fun WorkoutState.jumpRopeEstimateInputs(now: Long, projectWhenIdle: Boolean): JumpRopeEstimateInputs {
-    val totalJumps = totalJumpCount()
+private fun WorkoutState.jumpRopeEfforts(now: Long, projectWhenIdle: Boolean): List<JumpRopeSetEffort> {
     val roundWorkMillis = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
     if (!timerStarted) {
-        val projectedWork = if (projectWhenIdle && cardioMode == "intervals") roundWorkMillis * targetSetCount else 0L
-        val enteredRoundCount = sets.count { it.exercise == "Jump Rope" && (it.reps.toIntOrNull() ?: 0) > 0 }
-        val paceWork = if (projectedWork > 0L) roundWorkMillis * enteredRoundCount else 0L
-        return JumpRopeEstimateInputs(totalJumps.toDouble(), totalJumps, projectedWork, paceWork)
+        if (!projectWhenIdle) return emptyList()
+        return sets.filter { it.exercise == "Jump Rope" && (it.reps.toIntOrNull() ?: 0) > 0 }
+            .map { JumpRopeSetEffort(it.reps.toIntOrNull() ?: 0, roundWorkMillis) }
+    }
+    if (cardioMode != "intervals") {
+        val activeMillis = elapsedMillis(now)
+        val jumps = totalJumpCount()
+        return if (activeMillis > 0L && jumps > 0) listOf(JumpRopeSetEffort(jumps, activeMillis)) else emptyList()
     }
 
-    val elapsedWork = jumpRopeActiveWorkMillis(now)
-    if (cardioMode != "intervals") return JumpRopeEstimateInputs(0.0, totalJumps, elapsedWork, 0L)
-
-    // Count only rounds reached by the interval timer, so jump counts entered
-    // for future rounds do not inflate the live pace or calorie estimate.
-    val reachedRound = when {
-        intervalPhase == "countdown" -> 0
-        intervalPhase == "completed" -> targetSetCount
-        else -> intervalRound
+    val currentWorkMillis = if (!timerStopped && intervalPhase == "work") {
+        val remaining = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
+        (roundWorkMillis - remaining).coerceIn(0L, roundWorkMillis)
+    } else 0L
+    val maxRound = when (intervalPhase) {
+        "countdown" -> 0
+        "rest" -> intervalRound
+        "completed" -> targetSetCount
+        "work" -> intervalRound
+        else -> targetSetCount
     }
-    val reachedJumpsForPace = sets
-        .filter { it.exercise == "Jump Rope" && it.id <= reachedRound }
-        .sumOf { it.reps.toIntOrNull() ?: 0 }
-    val completedRounds = (elapsedWork / roundWorkMillis).toInt().coerceIn(0, reachedRound)
-    val partialRound = if (completedRounds < reachedRound) {
-        (elapsedWork - completedRounds * roundWorkMillis).coerceIn(0L, roundWorkMillis).toDouble() / roundWorkMillis
-    } else 0.0
-    val completedJumps = sets
-        .filter { it.exercise == "Jump Rope" && it.id <= completedRounds }
-        .sumOf { it.reps.toIntOrNull() ?: 0 }
-        .toDouble()
-    val partialJumps = sets
-        .firstOrNull { it.exercise == "Jump Rope" && it.id == completedRounds + 1 }
-        ?.reps?.toIntOrNull()?.toDouble()?.times(partialRound) ?: 0.0
-    return JumpRopeEstimateInputs(
-        jumpsForCalories = completedJumps + partialJumps,
-        jumpsForPace = reachedJumpsForPace,
-        activeWorkMillis = elapsedWork,
-        paceWorkMillis = roundWorkMillis * reachedRound,
-    )
+    return sets.asSequence()
+        .filter { it.exercise == "Jump Rope" && it.id <= maxRound }
+        .mapNotNull { set ->
+            val duration = when {
+                set.durationMillis > 0L -> set.durationMillis
+                set.completed -> roundWorkMillis
+                set.id == intervalRound && currentWorkMillis > 0L -> currentWorkMillis
+                else -> 0L
+            }
+            val jumps = set.reps.toIntOrNull() ?: 0
+            if (duration > 0L) JumpRopeSetEffort(jumps, duration) else null
+        }
+        .toList()
+}
+
+private fun WorkoutState.jumpRopeSetsAtFinish(now: Long): List<WorkoutSet> {
+    val jumpSets = sets.filter { it.exercise == "Jump Rope" }
+    val roundWorkMillis = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
+    if (cardioMode != "intervals" && timerStarted) {
+        val entered = jumpSets.filter { (it.reps.toIntOrNull() ?: 0) > 0 }
+        val jumpsTotal = entered.sumOf { it.reps.toIntOrNull() ?: 0 }
+        val activeMillis = elapsedMillis(now)
+        if (activeMillis <= 0L) return emptyList()
+        if (entered.isEmpty() || jumpsTotal <= 0) {
+            return jumpSets.firstOrNull()?.let { listOf(it.copy(completed = true, durationMillis = activeMillis)) } ?: emptyList()
+        }
+        var assignedMillis = 0L
+        return entered.mapIndexed { index, set ->
+            val duration = if (index == entered.lastIndex) activeMillis - assignedMillis
+                else (activeMillis * (set.reps.toIntOrNull() ?: 0) / jumpsTotal).coerceAtLeast(1L)
+            assignedMillis += duration
+            set.copy(completed = true, durationMillis = duration)
+        }
+    }
+
+    val currentWorkMillis = if (timerStarted && !timerStopped && intervalPhase == "work") {
+        val remaining = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
+        (roundWorkMillis - remaining).coerceIn(0L, roundWorkMillis)
+    } else 0L
+    return jumpSets.mapNotNull { set ->
+        val duration = when {
+            set.durationMillis > 0L -> set.durationMillis
+            set.id == intervalRound && currentWorkMillis > 0L -> currentWorkMillis
+            !timerStarted && set.completed -> roundWorkMillis
+            else -> 0L
+        }
+        if (duration <= 0L || (!set.completed && set.id != intervalRound)) null
+        else set.copy(completed = true, durationMillis = duration)
+    }
 }
 
 private fun WorkoutState.startActivityTimer(now: Long): WorkoutState {
     val jumpSets = if (activityType == "Jump Rope" && cardioMode == "intervals") {
         val existing = sets.filter { it.exercise == "Jump Rope" }
         (1..targetSetCount).map { index ->
-            existing.getOrNull(index - 1)?.copy(id = index, completed = false)
+            existing.getOrNull(index - 1)?.copy(id = index, completed = false, durationMillis = 0L)
                 ?: WorkoutSet(index, "Jump Rope", "0", "")
         }
     } else sets
@@ -1336,14 +1384,23 @@ private fun WorkoutState.stopActivityTimer(now: Long): WorkoutState {
     if (!timerStarted || timerStopped || finished) return this
     val workDuration = (runtimeMinutes.toLongOrNull() ?: 3L).coerceIn(1L, 999L) * 60_000L
     val remainingWork = if (pausedAt > 0L) pausedIntervalRemaining else (intervalEndsAt - now).coerceAtLeast(0L)
-    val activeWork = if (activityType == "Jump Rope" && cardioMode == "intervals" && intervalPhase == "work") {
+    val activeWork = if (cardioMode == "intervals" && intervalPhase == "work") {
         activeWorkMillis + (workDuration - remainingWork).coerceIn(0L, workDuration)
     } else activeWorkMillis
+    val stoppedSets = if (activityType == "Jump Rope" && cardioMode == "intervals" && intervalPhase == "work") {
+        val setDuration = (workDuration - remainingWork).coerceIn(0L, workDuration)
+        sets.map { set ->
+            if (set.exercise == "Jump Rope" && set.id == intervalRound && setDuration > 0L) {
+                set.copy(completed = (set.reps.toIntOrNull() ?: 0) > 0, durationMillis = setDuration)
+            } else set
+        }
+    } else sets
     return copy(
         elapsedBeforePause = elapsedMillis(now),
         pausedAt = now,
         timerStopped = true,
         activeWorkMillis = activeWork,
+        sets = stoppedSets,
         intervalPhase = "stopped",
         intervalEndsAt = 0L,
         pausedIntervalRemaining = 0L,
@@ -1850,7 +1907,7 @@ private fun JumpCountCard(
                 }
             }
             Text(
-                if (hasWeight) "With jump counts entered, calories estimate the logged jump volume and pace; the timer scales calories during each round. Without counts, calories use active time. Rest is excluded."
+                if (hasWeight) "Each set uses its jump count and timed length to estimate pace. Calories use profile weight, height, and age with 2024 Compendium pace bands; rest is excluded."
                 else "Add your body weight in Settings to estimate calories. Jump counts and timer tracking still work without it.",
                 color = Muted,
                 fontSize = 10.sp,
@@ -2070,6 +2127,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
     val strength = workout.activityType == "Strength"
     val setTracked = hasSetTracking(workout.activityType)
     val missingWeights = strength && workout.sets.hasMissingRequiredWeights()
+    val canFinish = if (workout.activityType == "Jump Rope") workout.timerStarted || completed > 0 else !setTracked || (completed > 0 && !missingWeights)
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().background(SoftGreen, RoundedCornerShape(15.dp)).padding(14.dp),
@@ -2091,7 +2149,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
         if (!workout.finished) {
             Button(
                 onClick = onFinish,
-                enabled = !setTracked || (completed > 0 && !missingWeights),
+                enabled = canFinish,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Forest),
@@ -2101,6 +2159,7 @@ private fun SessionFooter(workout: WorkoutState, onFinish: () -> Unit) {
                         !setTracked -> "Finish ${workout.activityType.lowercase(Locale.getDefault())}"
                         missingWeights -> "Enter weights for weighted exercises"
                         completed > 0 -> "Finish ${if (strength) "workout" else "jump rope"} · $completed / ${workout.sets.size} sets done"
+                        workout.activityType == "Jump Rope" && workout.timerStarted -> "End workout · save final calorie estimate"
                         else -> "Complete a set to finish"
                     },
                     fontWeight = FontWeight.SemiBold,
@@ -2464,6 +2523,7 @@ private fun EmptyHistoryCard() {
 
 @Composable
 private fun HistoryCard(record: WorkoutRecord) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val hasSets = hasSetTracking(record.activityType)
     val completedSets = record.sets.filter { it.completed }
     val volume = completedSets.sumOf { set ->
@@ -2485,12 +2545,22 @@ private fun HistoryCard(record: WorkoutRecord) {
             )
             record.estimatedCalories?.let { kcal ->
                 Text(
-                    if (record.distanceMeters != null) "~$kcal kcal · distance-based estimate" else "~$kcal kcal · time-based estimate",
+                    when {
+                        record.distanceMeters != null -> "~$kcal kcal · distance-based estimate"
+                        record.activityType == "Jump Rope" -> "~$kcal kcal · per-set pace estimate"
+                        else -> "~$kcal kcal · time-based estimate"
+                    },
                     color = Forest,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 12.sp,
                 )
-                record.weightKg?.let { weight -> Text("Estimate used ${"%.1f".format(Locale.US, weight)} kg body weight", color = Muted, fontSize = 10.sp) }
+                record.weightKg?.let { weight ->
+                    Text(
+                        "Estimate used ${"%.1f".format(Locale.US, weight)} kg body weight${record.heightCm?.let { " and $it cm height" } ?: ""}",
+                        color = Muted,
+                        fontSize = 10.sp,
+                    )
+                }
             }
             record.distanceMeters?.takeIf { it > 0 }?.let { distance ->
                 val pace = record.averagePaceSecondsPerKm
@@ -2511,8 +2581,11 @@ private fun HistoryCard(record: WorkoutRecord) {
                 }
             }
             record.sets.forEach { set ->
+                val setPace = if (set.exercise == "Jump Rope" && set.durationMillis > 0L) {
+                    ((set.reps.toIntOrNull() ?: 0) * 60_000.0 / set.durationMillis).toInt()
+                } else null
                 Text(
-                    "${if (set.completed) "✓" else "·"}  ${set.exercise}  ·  ${set.reps} ${if (set.exercise == "Jump Rope") "jumps" else "reps"}${set.weight.takeIf { it.isNotBlank() }?.let { " × $it kg" } ?: ""}",
+                    "${if (set.completed) "✓" else "·"}  ${set.exercise}  ·  ${set.reps} ${if (set.exercise == "Jump Rope") "jumps" else "reps"}${set.weight.takeIf { it.isNotBlank() }?.let { " × $it kg" } ?: ""}${setPace?.let { " · ${formatClock(set.durationMillis)} · $it jumps/min" } ?: ""}",
                     color = Muted,
                     fontSize = 12.sp,
                 )

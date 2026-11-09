@@ -16,6 +16,8 @@ data class ActivityDefinition(
     }
 }
 
+data class JumpRopeSetEffort(val jumps: Int, val durationMillis: Long)
+
 object ActivityCalories {
     private const val PUSHUP_VIGOROUS_MET = 8.0
     private const val WALKING_SPEED_KMH = 4.8
@@ -64,35 +66,39 @@ object ActivityCalories {
         return estimateMetCalories(met, weightKg, durationMillis, heightCm, ageYears)
     }
 
-    /** Uses jump volume for the total and active time / cadence for intensity. */
-    fun estimateJumpRopeCalories(
-        jumps: Double,
-        activeWorkMillis: Long,
+    /**
+     * Estimates jump-rope calories from each set's recorded jumps and active time.
+     * Pace selects the Compendium intensity band; jump count determines the work volume,
+     * so adding rest or changing round length alone does not multiply or erase calories.
+     */
+    fun estimateJumpRopeSetCalories(
+        sets: List<JumpRopeSetEffort>,
         weightKg: Double,
-        paceWorkMillis: Long = activeWorkMillis,
-        paceJumps: Int = jumps.toInt(),
+        heightCm: Int? = null,
+        ageYears: Int? = null,
     ): Int? {
-        if (activeWorkMillis <= 0L || weightKg <= 0.0) return null
-        val activeMinutes = activeWorkMillis / 60_000.0
-        // Before the user has entered a jump count, use the moderate pace band
-        // as a provisional estimate. Replace it with the measured band after entry.
-        val paceMinutes = (paceWorkMillis.takeIf { it > 0L } ?: activeWorkMillis) / 60_000.0
-        val skipsPerMinute = if (paceJumps > 0) paceJumps / paceMinutes else 100.0
-        val met = when {
-            skipsPerMinute < 100.0 -> 8.3
-            skipsPerMinute < 120.0 -> 11.8
-            else -> 12.3
-        }
-        // Compendium conversion: MET × 3.5 × kg / 200 = kcal/min.
-        val caloriesPerMinute = met * 3.5 * weightKg / 200.0
-        // When jump counts are entered, estimate total burn from jump volume at
-        // a 120-skip/min reference cadence. The caller prorates live jump volume
-        // through each active round; changing work duration alone cannot erase
-        // calories for the same completed jump count.
-        val calories = if (jumps > 0.0 && paceWorkMillis > 0L) {
-            caloriesPerMinute * (jumps / 120.0)
-        } else {
-            caloriesPerMinute * activeMinutes
+        if (weightKg <= 0.0) return null
+        val timedSets = sets.filter { it.durationMillis > 0L }
+        if (timedSets.isEmpty()) return null
+        val height = heightCm?.takeIf { it in 80..250 }
+        val age = ageYears?.takeIf { it in 13..120 }
+        val adjustment = restingRateAdjustment(weightKg, height, age)
+        val calories = timedSets.sumOf { set ->
+            val minutes = set.durationMillis / 60_000.0
+            if (set.jumps <= 0) {
+                return@sumOf (11.8 * 3.5 * weightKg / 200.0 * minutes) * adjustment
+            }
+            val skipsPerMinute = set.jumps / minutes
+            val met = when {
+                skipsPerMinute < 100.0 -> 8.3
+                skipsPerMinute <= 120.0 -> 11.8
+                else -> 12.3
+            }
+            val perMinute = met * 3.5 * weightKg / 200.0
+            // Normalize to 120 skips/min as the reference work cadence. Pace changes
+            // the MET band, while the user's recorded jumps set total exercise volume.
+            val reference = perMinute * (set.jumps / 120.0)
+            reference * adjustment
         }
         return calories.roundToInt().coerceAtLeast(0)
     }
@@ -169,19 +175,25 @@ object ActivityCalories {
         val minutes = durationMillis / 60_000.0
         val height = heightCm?.takeIf { it in 80..250 }
         val age = ageYears?.takeIf { it in 13..120 }
-        if (height != null && age != null) {
+        if (height != null || age != null) {
             // Mifflin-St Jeor's male/female constants are averaged here because
             // the app does not collect sex. Use that resting-energy estimate to
             // scale the activity MET value by this person's height, age, and weight.
-            val restingKcalPerDay = 10.0 * weightKg + 6.25 * height - 5.0 * age - 78.0
+            val adjustment = restingRateAdjustment(weightKg, height, age)
             // MET is defined relative to body mass; use the standard MET equation and
             // apply a modest resting-rate adjustment from height/age when available.
             val base = met * 3.5 * weightKg / 200.0 * minutes
-            val referenceRmr = 10.0 * weightKg + 6.25 * 170.0 - 5.0 * 35.0 - 78.0
-            val adjustment = (restingKcalPerDay / referenceRmr).coerceIn(0.8, 1.2)
             return (base * adjustment).toInt().coerceAtLeast(0)
         }
         // Without height and age, fall back to the standard MET × 3.5 ml/kg/min conversion.
         return ((met * 3.5 * weightKg / 200.0) * minutes).toInt()
+    }
+
+    private fun restingRateAdjustment(weightKg: Double, height: Int?, age: Int?): Double {
+        // Mifflin-St Jeor correction, using neutral reference values for profile fields
+        // the user has not entered. Sex is not collected, so the averaged constant is used.
+        val personalRmr = 10.0 * weightKg + 6.25 * (height ?: 170) - 5.0 * (age ?: 35) - 78.0
+        val referenceRmr = 10.0 * weightKg + 6.25 * 170.0 - 5.0 * 35.0 - 78.0
+        return (personalRmr / referenceRmr).coerceIn(0.8, 1.2)
     }
 }
