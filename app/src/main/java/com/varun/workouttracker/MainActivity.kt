@@ -1,6 +1,7 @@
 package com.varun.workouttracker
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -14,6 +15,7 @@ import android.media.ToneGenerator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -57,6 +59,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +72,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Calendar
@@ -80,6 +86,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.Scope
 
 private val Canvas = Color(0xFFF5F3EF)
 private val Ink = Color(0xFF292B2E)
@@ -179,6 +188,14 @@ private fun WorkoutTrackerApp() {
     var customExercise by remember { mutableStateOf("") }
     var showActivityPicker by remember { mutableStateOf(false) }
     var templates by remember { mutableStateOf(WorkoutStorage.loadTemplates(context)) }
+    var googleSheetId by remember { mutableStateOf(GoogleSheetsSync.spreadsheetId(context)) }
+    var googleSheetsLastSynced by remember { mutableLongStateOf(GoogleSheetsSync.lastSyncedAt(context)) }
+    var googleSheetsSyncing by remember { mutableStateOf(false) }
+    var googleSheetsMessage by remember { mutableStateOf("") }
+    val coroutineScope = rememberCoroutineScope()
+    val googleAuthorizationClient = remember(context) {
+        Identity.getAuthorizationClient(context as Activity)
+    }
     var showTemplateNameDialog by remember { mutableStateOf(false) }
     var templateNameDraft by remember { mutableStateOf("") }
     var pendingTemplate by remember { mutableStateOf<WorkoutTemplate?>(null) }
@@ -257,6 +274,84 @@ private fun WorkoutTrackerApp() {
     val toggleStepTracking = {
         if (stepTracking) context.startService(Intent(context, StepCounterService::class.java).setAction(StepCounterService.ACTION_STOP))
         else requestStepTracking()
+    }
+    val syncWithGoogleAccessToken: (String) -> Unit = { accessToken ->
+        googleSheetsSyncing = true
+        googleSheetsMessage = "Syncing your local data to Google Sheets…"
+        coroutineScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    GoogleSheetsSync.sync(context, accessToken, workout.history, templates)
+                }
+                googleSheetId = result.spreadsheetId
+                googleSheetsLastSynced = result.syncedAt
+                googleSheetsMessage = "Sync complete. Your sheet is in your Google Drive."
+            } catch (error: Exception) {
+                googleSheetsMessage = error.message?.let { "Sync failed: $it" } ?: "Google Sheets sync failed. Try again."
+            } finally {
+                googleSheetsSyncing = false
+            }
+        }
+    }
+    val googleAuthorizationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK || result.data == null) {
+            googleSheetsSyncing = false
+            googleSheetsMessage = "Google Sheets access was cancelled."
+        } else {
+            runCatching { googleAuthorizationClient.getAuthorizationResultFromIntent(result.data!!) }
+                .onSuccess { authorization ->
+                    val token = authorization.accessToken?.takeIf { GoogleSheetsSync.SCOPE in authorization.grantedScopes }
+                    if (token.isNullOrBlank()) {
+                        googleSheetsSyncing = false
+                        googleSheetsMessage = "Google Drive file access was not granted. Try connecting again."
+                    } else syncWithGoogleAccessToken(token)
+                }
+                .onFailure { error ->
+                    googleSheetsSyncing = false
+                    googleSheetsMessage = error.message?.let { "Google authorization failed: $it" } ?: "Google authorization failed."
+                }
+        }
+    }
+    val beginGoogleSheetsSync = {
+        googleSheetsSyncing = true
+        googleSheetsMessage = "Requesting Google Sheets access…"
+        val request = AuthorizationRequest.builder()
+            .setRequestedScopes(listOf(Scope(GoogleSheetsSync.SCOPE)))
+            .build()
+        googleAuthorizationClient.authorize(request)
+            .addOnSuccessListener { authorization ->
+                if (authorization.hasResolution()) {
+                    val pendingIntent = authorization.pendingIntent
+                    if (pendingIntent == null) {
+                        googleSheetsSyncing = false
+                        googleSheetsMessage = "Google authorization needs another step. Try again."
+                    } else {
+                        googleAuthorizationLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                    }
+                } else {
+                    val token = authorization.accessToken?.takeIf { GoogleSheetsSync.SCOPE in authorization.grantedScopes }
+                    if (token.isNullOrBlank()) {
+                        googleSheetsSyncing = false
+                        googleSheetsMessage = "Google Drive file access was not granted. Try connecting again."
+                    } else syncWithGoogleAccessToken(token)
+                }
+            }
+            .addOnFailureListener { error ->
+                googleSheetsSyncing = false
+                googleSheetsMessage = error.message?.let { "Google authorization failed: $it" } ?: "Google authorization failed."
+            }
+    }
+    val disconnectGoogleSheets = {
+        googleSheetsSyncing = true
+        googleAuthorizationClient.revokeAccess().addOnCompleteListener {
+            GoogleSheetsSync.disconnect(context)
+            googleSheetId = null
+            googleSheetsLastSynced = 0L
+            googleSheetsSyncing = false
+            googleSheetsMessage = "Disconnected. The existing spreadsheet remains in your Drive."
+        }
     }
     val startRunGpsService: (String) -> Unit = { activity ->
         gpsActivityType = activity
@@ -893,6 +988,21 @@ private fun WorkoutTrackerApp() {
                             )
                         }
                         item {
+                            GoogleSheetsSettingsCard(
+                                connected = googleSheetId != null,
+                                lastSyncedAt = googleSheetsLastSynced,
+                                syncing = googleSheetsSyncing,
+                                message = googleSheetsMessage,
+                                onSync = { beginGoogleSheetsSync() },
+                                onOpenSheet = {
+                                    GoogleSheetsSync.spreadsheetUrl(context)?.let { sheetUrl ->
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(sheetUrl)))
+                                    }
+                                },
+                                onDisconnect = { disconnectGoogleSheets() },
+                            )
+                        }
+                        item {
                             SettingsGoalsCard(
                                 stepGoal = stepGoal,
                                 pushupGoal = pushupGoal,
@@ -1487,6 +1597,58 @@ private fun SettingsPersonalInfoCard(
             }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = ButtonDefaults.buttonColors(containerColor = Forest)) {
                 Text("Save personal info")
             }
+        }
+    }
+}
+
+@Composable
+private fun GoogleSheetsSettingsCard(
+    connected: Boolean,
+    lastSyncedAt: Long,
+    syncing: Boolean,
+    message: String,
+    onSync: () -> Unit,
+    onOpenSheet: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("GOOGLE SHEETS BACKUP", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            Text(
+                if (connected) "Connected to your Google Drive" else "Create a private spreadsheet in your Google Drive",
+                color = Ink,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Sync copies workouts, sets, weigh-ins, and routines from this phone. Sheet edits do not sync back to the app.",
+                color = Muted,
+                fontSize = 11.sp,
+            )
+            if (lastSyncedAt > 0L) {
+                Text(
+                    "Last synced ${SimpleDateFormat("d MMM yyyy, h:mm a", Locale.getDefault()).format(Date(lastSyncedAt))}",
+                    color = Muted,
+                    fontSize = 11.sp,
+                )
+            }
+            if (message.isNotBlank()) Text(message, color = Forest, fontSize = 12.sp)
+            Button(
+                onClick = onSync,
+                enabled = !syncing,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(13.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Forest),
+            ) {
+                Text(if (syncing) "Working…" else if (connected) "Sync now" else "Connect Google Sheets")
+            }
+            if (connected) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    TextButton(onClick = onOpenSheet, enabled = !syncing) { Text("Open spreadsheet", color = Forest) }
+                    TextButton(onClick = onDisconnect, enabled = !syncing) { Text("Disconnect", color = Muted) }
+                }
+            }
+            Text("Google access is limited to spreadsheet files created by this app.", color = Muted, fontSize = 10.sp)
         }
     }
 }

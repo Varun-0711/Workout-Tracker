@@ -22,5 +22,6 @@ Open this folder in Android Studio and let Gradle sync. The project targets Andr
 - Create strength routines from the Workout chooser or save a current workout, including set entries and the rest timer setting
 - Pause and resume the session clock and rest timer
 - Finish workouts and browse saved sessions
+- Manually sync a one-way snapshot of workouts, sets, weigh-ins, and routines to a private Google Sheets file; see [Google Sheets setup](docs/google-sheets-setup.md)
 
-Google Drive sync, planning, reminders, and sharing remain future slices from the product spec.
+Planning, reminders, and sharing remain future slices from the product spec.

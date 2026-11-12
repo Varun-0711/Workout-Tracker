@@ -101,7 +101,7 @@ object WorkoutStorage {
     fun bodyWeightBefore(context: Context, time: Long): Double? =
         loadWeighIns(context).filter { it.first <= time }.maxByOrNull { it.first }?.second
 
-    private fun loadWeighIns(context: Context): List<Pair<Long, Double>> {
+    fun loadWeighIns(context: Context): List<Pair<Long, Double>> {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(WEIGH_INS_KEY, null) ?: return emptyList()
         val rows = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
         return (0 until rows.length()).mapNotNull { index ->
