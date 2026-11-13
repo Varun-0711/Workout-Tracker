@@ -23,5 +23,6 @@ Open this folder in Android Studio and let Gradle sync. The project targets Andr
 - Pause and resume the session clock and rest timer
 - Finish workouts and browse saved sessions
 - Manually sync a one-way snapshot of workouts, sets, weigh-ins, and routines to a private Google Sheets file; see [Google Sheets setup](docs/google-sheets-setup.md)
+- Local browser companion for view-only workout history, calendar, exercise records, volume, and weight trends; see [PC companion](pc/README.md)
 
 Planning, reminders, and sharing remain future slices from the product spec.

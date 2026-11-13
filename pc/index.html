@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Workout Tracker · Progress</title>
+  <meta name="description" content="Your private workout progress, history, and personal records on PC.">
+  <link rel="icon" href="logo.png"><link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script><script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview"><img src="logo.png" alt=""><span>WORKOUT<br><strong>TRACKER</strong></span></a>
+    <div class="nav-label">YOUR TRAINING</div>
+    <nav aria-label="Main navigation">
+      <a href="#overview" data-page="overview"><span>01</span> Overview</a>
+      <a href="#history" data-page="history"><span>02</span> Workout history</a>
+      <a href="#progress" data-page="progress"><span>03</span> Progress & records</a>
+      <a href="#routines" data-page="routines"><span>04</span> Saved routines</a>
+    </nav>
+    <div class="sidebar-bottom"><span class="small-label">PHONE TO DESKTOP</span><p>Your training.<br>A little more perspective.</p><small>View-only companion</small></div>
+  </aside>
+  <main>
+    <header><div><span class="eyebrow">THE BIGGER PICTURE</span><h1 id="page-title">Your progress, at a glance.</h1><p class="subtitle">A place to see how far you’ve come.</p></div><button id="connect" class="primary">Connect Google Sheets</button></header>
+    <section class="connection" aria-label="Data connection"><div><span id="source-dot" class="dot"></span><strong id="source-label">No data connected</strong><span id="source-time">Sync on your phone, then connect here.</span></div><div class="connection-actions"><button id="demo">Explore demo</button><button id="refresh" hidden>Refresh</button><button id="change" hidden>Change sheet</button><button id="disconnect" hidden>Disconnect</button></div></section>
+    <p id="status" role="status" aria-live="polite"></p>
+    <div id="setup" class="notice" hidden><strong>Google connection needs developer setup.</strong><p>Follow <code>pc/README.md</code> to configure this companion once. You can explore the dashboard with demo data now.</p></div>
+    <section class="toolbar"><div class="periods" aria-label="Date range"><button data-days="30" aria-pressed="true">30 days</button><button data-days="90" aria-pressed="false">90 days</button><button data-days="all" aria-pressed="false">All time</button></div><label>Activity <select id="activity"><option value="all">All activities</option></select></label><span id="range-label"></span></section>
+    <div id="content"></div>
+    <footer>Logged on your phone. Viewed here. <span>Calories are estimates. Refresh to read your latest phone sync.</span></footer>
+  </main>
+  <dialog id="details"><button id="close-details" class="dialog-close" aria-label="Close workout details">Close</button><div id="detail-content"></div></dialog>
+</body>
+</html>

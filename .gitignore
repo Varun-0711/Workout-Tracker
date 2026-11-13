@@ -26,6 +26,10 @@ credentials.json
 .env
 .env.*
 
+# PC companion developer configuration and dependencies
+pc/config.js
+**/node_modules/
+
 # Operating system files
 .DS_Store
 Thumbs.db
